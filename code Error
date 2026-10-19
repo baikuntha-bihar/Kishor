@@ -1,138 +1,48 @@
-package com.epay.otherinb.externalservice;
+package com.epay.otherinb.dto;
 
-import com.epay.otherinb.config.OtherInbConfigDetails;
-import com.epay.otherinb.exceptions.OtherInbPaymentException;
-import com.epay.otherinb.util.constants.ErrorConstants;
-import com.epay.otherinb.util.constants.OtherInbConstants;
-import com.epay.otherinb.util.encryptdecryptutil.ICICIRetailEncryptionDecryptionUtil;
-import com.sbi.epay.logging.utility.LoggerFactoryUtility;
-import com.sbi.epay.logging.utility.LoggerUtility;
-import lombok.RequiredArgsConstructor;
-import org.springframework.stereotype.Component;
-import org.springframework.util.StringUtils;
-import org.springframework.web.reactive.function.client.WebClient;
-import reactor.core.publisher.Mono;
-import reactor.util.retry.Retry;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
 
-import java.text.MessageFormat;
-import java.time.Duration;
-import java.util.Optional;
+import java.math.BigDecimal;
 
-@Component
-@RequiredArgsConstructor
-public class ICICIPaymentWebClientService {
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+@Builder
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class ICICIResponseDto {
+    private String atrn;
+    private String prn;
+    private String itc;
+    private BigDecimal amount;
+    private String crn;
+    private String paId;
+    private String bId;
+}
 
-    private final LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
 
-    private final OtherInbConfigDetails otherInbConfigDetails;
-    private final ICICIRetailEncryptionDecryptionUtil iciciRetailEncryptionDecryptionUtil;
+==============
+package com.epay.otherinb.dto;
 
-    // ==========================================================================
-    // DV request: ENCRYPT plain → POST → return raw encrypted response
-    // ==========================================================================
-    public String processingDoubleVerRequest(String plainDvRequestAndChecksum) {
-        if (!StringUtils.hasText(plainDvRequestAndChecksum)) {
-            logger.error("Empty DV request payload");
-            throw new OtherInbPaymentException(
-                    ErrorConstants.DOUBLE_VERIFICATION_ERROR_CODE,
-                    ErrorConstants.DOUBLE_VERIFICATION_ERROR_MESSAGE);
-        }
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
 
-        try {
-            // ENCRYPT (was incorrectly decrypting)
-            String encryptedDvData =
-                    iciciRetailEncryptionDecryptionUtil.iciciEncrypt(plainDvRequestAndChecksum);
-            logger.info("ICICI DV encrypted request length={}",
-                    encryptedDvData == null ? 0 : encryptedDvData.length());
+import java.math.BigDecimal;
 
-            // dedicated ICICI DV URL (was merchant redirect page)
-            String dvUrl = otherInbConfigDetails.getIciciDvUrl();
-            if (!StringUtils.hasText(dvUrl)) {
-                logger.error("ICICI DV URL not configured");
-                throw new OtherInbPaymentException(
-                        ErrorConstants.DOUBLE_VERIFICATION_ERROR_CODE,
-                        ErrorConstants.DOUBLE_VERIFICATION_ERROR_MESSAGE);
-            }
-
-            // proper form body "mid=<code>&encData=<data>"
-            String requestBody = "mid=" + otherInbConfigDetails.getIciciMerchantCode()
-                    + OtherInbConstants.ICICI_ENC_DATA
-                    + encryptedDvData;
-
-            String dvResponse = Optional
-                    .ofNullable(callDvVerificationApi(dvUrl, requestBody))
-                    .filter(StringUtils::hasText)
-                    .orElseThrow(() -> new OtherInbPaymentException(
-                            ErrorConstants.DOUBLE_VERIFICATION_ERROR_CODE,
-                            ErrorConstants.DOUBLE_VERIFICATION_ERROR_MESSAGE));
-
-            logger.info("ICICI DV raw response length={}", dvResponse.length());
-            return dvResponse;
-
-        } catch (OtherInbPaymentException e) {
-            throw e;
-        } catch (Exception e) {
-            logger.error("Unexpected error in processingDoubleVerRequest", e);
-            throw new OtherInbPaymentException(
-                    ErrorConstants.DOUBLE_VERIFICATION_ERROR_CODE,
-                    ErrorConstants.DOUBLE_VERIFICATION_ERROR_MESSAGE);
-        }
-    }
-
-    // ==========================================================================
-    // HTTP call to ICICI DV endpoint
-    // ==========================================================================
-    private String callDvVerificationApi(String dvUrl, String encryptedFormBody) {
-        logger.info("Calling ICICI DV endpoint url={} payloadLength={}",
-                dvUrl, encryptedFormBody.length());
-
-        WebClient webClient = WebClient.builder().baseUrl(dvUrl).build();
-
-        try {
-            return webClient.post()
-                    .header(OtherInbConstants.REQUESTPROPERTY,
-                            OtherInbConstants.URL_ENCODED_CONTENT_TYPE)
-                    .bodyValue(encryptedFormBody)
-                    .retrieve()
-                    .onStatus(status -> !status.is2xxSuccessful(),
-                            response -> response.bodyToMono(String.class)
-                                    .flatMap(body -> {
-                                        logger.error(
-                                                "ICICI DV non-2xx status={} body={}",
-                                                response.statusCode(), body);
-                                        return Mono.error(new OtherInbPaymentException(
-                                                ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE,
-                                                MessageFormat.format(
-                                                        ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE,
-                                                        OtherInbConstants.ICICI_CONST)));
-                                    }))
-                    .bodyToMono(String.class)
-                    .doOnNext(body -> logger.info(
-                            "ICICI DV response body length={}",
-                            body == null ? 0 : body.length()))
-                    .doOnError(err -> logger.error("ICICI DV call error", err))
-                    .onErrorResume(err -> Mono.error(new OtherInbPaymentException(
-                            ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE,
-                            MessageFormat.format(
-                                    ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE,
-                                    OtherInbConstants.ICICI_CONST))))
-                    .retryWhen(Retry.fixedDelay(3, Duration.ofSeconds(1))
-                            .filter(t -> t instanceof OtherInbPaymentException)
-                            .doBeforeRetry(rs -> logger.info(
-                                    "Retrying ICICI DV attempt {} due to: {}",
-                                    rs.totalRetries() + 1,
-                                    rs.failure().getMessage())))
-                    .block();
-
-        } catch (OtherInbPaymentException e) {
-            throw e;
-        } catch (Exception e) {
-            logger.error("Exception during ICICI DV HTTP call", e);
-            throw new OtherInbPaymentException(
-                    ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE,
-                    MessageFormat.format(
-                            ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE,
-                            OtherInbConstants.ICICI_CONST));
-        }
-    }
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+@Builder
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class ICICIDvResponseDto {
+    private String prn;
+    private String bId;
+    private String paId;
+    private BigDecimal amount;
 }
