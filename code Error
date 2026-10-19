@@ -1,0 +1,156 @@
+class : ICICIRetailPaymentService
+========================================
+
+package com.epay.otherinb.service;
+
+import com.epay.otherinb.config.OtherInbConfigDetails;
+import com.epay.otherinb.dao.OrderDao;
+import com.epay.otherinb.dao.TransactionDao;
+import com.epay.otherinb.dto.ICICIDvResponseDto;
+import com.epay.otherinb.dto.ICICIResponseDto;
+import com.epay.otherinb.dto.TransactionDto;
+import com.epay.otherinb.entity.Order;
+import com.epay.otherinb.exceptions.OtherInbPaymentException;
+import com.epay.otherinb.externalservice.ICICIPaymentWebClientService;
+import com.epay.otherinb.model.response.FinalResponseStatus;
+import com.epay.otherinb.model.response.PaymentFinalResponse;
+import com.epay.otherinb.util.constants.ErrorConstants;
+import com.epay.otherinb.util.constants.OtherInbConstants;
+import com.epay.otherinb.util.encryptdecryptutil.ICICIRetailEncryptionDecryptionUtil;
+import com.epay.otherinb.util.enums.PaymentStatus;
+import com.epay.otherinb.validator.OtherInbPaymentValidator;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+import org.springframework.web.servlet.view.RedirectView;
+
+import javax.crypto.BadPaddingException;
+import javax.crypto.IllegalBlockSizeException;
+import javax.crypto.NoSuchPaddingException;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.security.InvalidAlgorithmParameterException;
+import java.security.InvalidKeyException;
+import java.security.NoSuchAlgorithmException;
+import java.util.Base64;
+import java.util.Optional;
+
+@Service
+@RequiredArgsConstructor
+public class ICICIRetailPaymentService {
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+    private final OtherInbPaymentValidator otherInbpaymentValidator;
+    private final ICICIPaymentWebClientService iCICIPaymentWebClientService;
+    private final ICICIRetailEncryptionDecryptionUtil iciciRetailEncryptionDecryptionUtil;
+    private final TransactionDao transactionDao;
+    private final OtherInbConfigDetails otherInbConfigDetails;
+    private final OrderDao orderDao;
+    private final PaymentCallbackForwardService paymentCallbackForwardService;
+
+    // ICICIPaymentWebClientService
+    public RedirectView processICICIWebResponsePayload(String webResponse) throws InvalidAlgorithmParameterException, IllegalBlockSizeException, NoSuchPaddingException, BadPaddingException, NoSuchAlgorithmException, InvalidKeyException {
+        PaymentFinalResponse paymentFinalResponse = processICICICallBack(webResponse);
+        logger.info("Payment ICICI response to transaction service paymentFinalResponse {} ", paymentFinalResponse);
+        TransactionDto transactionDto = transactionDao.getValidPaymentAckReq(paymentFinalResponse.getAtrn(), paymentFinalResponse.getTransactionStatus().toUpperCase().equalsIgnoreCase(OtherInbConstants.FAILURE_CONST) ? OtherInbConstants.FAILED : paymentFinalResponse.getTransactionStatus().toUpperCase());
+        RedirectView redirectView = new RedirectView();
+        redirectView.setUrl((otherInbConfigDetails.getMerchantResponseView()).concat(OtherInbConstants.MERCHANT_FINAL_RESPONSE).concat(Base64.getEncoder().encodeToString(paymentCallbackForwardService.processCallbackResponse(paymentFinalResponse, transactionDto, orderDao.getOrderDetails(transactionDto)).getBytes())));
+        return redirectView;
+    }
+
+    public PaymentFinalResponse processICICICallBack(String webResponse) throws InvalidAlgorithmParameterException, IllegalBlockSizeException, NoSuchPaddingException, BadPaddingException, NoSuchAlgorithmException, InvalidKeyException {
+        // Decrypt Web response
+        String decryptedWebResponse = Optional.of(iciciRetailEncryptionDecryptionUtil.iciciDecrypt(webResponse.replaceAll(OtherInbConstants.NEW_LINE_REGEX, OtherInbConstants.PATTERN_EMPTY).replace(OtherInbConstants.PATTERN_SPACE, OtherInbConstants.PATTERN_EMPTY), "", "")).filter(x -> !x.isEmpty()).orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.ICICI_WEB_RESPONSE_ERROR_CODE, ErrorConstants.ICICI_WEB_RESPONSE_ERROR_MESSAGE));
+        logger.info("Payment Callback Decrypted Web Response {} ", decryptedWebResponse);
+        otherInbpaymentValidator.validateICICIWebResponse(iciciRetailEncryptionDecryptionUtil.getDecryptedData(decryptedWebResponse));
+        // Create web response DTO.
+        ICICIResponseDto iciciMapWebResponseDto = Optional.ofNullable(new ObjectMapper().convertValue(iciciRetailEncryptionDecryptionUtil.iciciDecrypt(decryptedWebResponse, "", ""), ICICIResponseDto.class)).orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.ICICI_WEB_RESPONSE_ERROR_CODE, ErrorConstants.ICICI_WEB_RESPONSE_ERROR_MESSAGE));
+        logger.info("Payment Callback Decrypted Web Response iciciMapWebResponseDto {} ", iciciMapWebResponseDto);
+        // Save Web response in DB
+        if (!iciciMapWebResponseDto.getPaId().equalsIgnoreCase(OtherInbConstants.ICICI_STATUS_SUCCESS_CONST)) {
+            return getRedirectObject(iciciMapWebResponseDto);
+        }
+        // Validated PaymentResponse for ICICI
+        ICICIResponseDto callBackResponse = mapCallBackResponse(iciciMapWebResponseDto);
+        otherInbpaymentValidator.validateICICIcallBack(callBackResponse);
+        // atrn txn status is BOOKED and payment status is PAYMENT_INITIATION_START / amount Validation
+        iciciDvinitiationProcess(callBackResponse);
+        //Redirecting to Browser.
+        return getRedirectObject(iciciMapWebResponseDto);
+    }
+
+    public PaymentFinalResponse iciciDvinitiationProcess(ICICIResponseDto iciciResponseDto) throws InvalidAlgorithmParameterException, IllegalBlockSizeException, NoSuchPaddingException, BadPaddingException, NoSuchAlgorithmException, InvalidKeyException {
+        transactionDao.getValidPaymentAckReq(iciciResponseDto.getPrn(), PaymentStatus.BOOKED.toString(), OtherInbConstants.ICICI_CONST);
+
+        switch (iciciResponseDto.getPaId()) {
+            case OtherInbConstants.ICICI_STATUS_SUCCESS_CONST -> {
+                String dvRequestString = iciciRetailEncryptionDecryptionUtil.processICICIDoubleVerRequest1(iciciResponseDto);
+                logger.info("Payment Callback Plain DV Request for ICICI {} ", dvRequestString);
+                String ICICIResponse = iCICIPaymentWebClientService.processingDoubleVerRequest(dvRequestString);
+                logger.info("Payment Callback Plain DV Response for ICICI {} ", ICICIResponse);
+                String decryptedDVResponse = URLDecoder.decode(iciciRetailEncryptionDecryptionUtil.iciciDecrypt(ICICIResponse.trim().replaceAll(OtherInbConstants.NEW_LINE_REGEX, OtherInbConstants.PATTERN_EMPTY).replace(OtherInbConstants.PATTERN_SPACE, OtherInbConstants.PATTERN_EMPTY), "", ""), StandardCharsets.UTF_8);
+                logger.info("Payment Callback Decrypted and Decode Double Verification Response {} ", decryptedDVResponse);
+                ICICIDvResponseDto icicimapDVResponseDto = convertDvResponsetoDto(decryptedDVResponse);
+                if (!icicimapDVResponseDto.getPrn().equalsIgnoreCase(OtherInbConstants.ICICI_STATUS_SUCCESS_CONST)) {
+                    ICICIResponseDto MapWebResponseDto = ICICIResponseDto.builder().paId(icicimapDVResponseDto.getPaId()).paId(icicimapDVResponseDto.getPaId()).atrn(icicimapDVResponseDto.getPrn()).build();
+                    return getRedirectObject(MapWebResponseDto);
+                }
+                logger.info("Payment Callback icicimapDVResponseDto@@@@@@ for ICICI {} ", icicimapDVResponseDto);
+                validateCallBackResponse(iciciResponseDto, icicimapDVResponseDto); // Check Method...
+                ICICIDvResponseDto iciciDvResponseDto = iciciRetailEncryptionDecryptionUtil.processICICIDoubleVerRequest(iciciResponseDto);
+                logger.info("Payment Callback ICICIDvResponseDto for ICICI {} ", iciciDvResponseDto);
+            }
+            default -> {
+                return getRedirectObject(iciciResponseDto);
+            }
+        }
+        return getRedirectObject(iciciResponseDto);
+    }
+
+
+    public PaymentFinalResponse getRedirectObject(ICICIResponseDto iciciResponseDto) {
+        logger.info("Payment Callback ICICIDvResponseDto######## for ICICI atrn : {} status : {} paymodecode : {} ", iciciResponseDto.getPrn(), iciciResponseDto.getPaId().equalsIgnoreCase(OtherInbConstants.ZERO) ? OtherInbConstants.SUCCESS : OtherInbConstants.FAILED, OtherInbConstants.ICICI_CONST);
+        TransactionDto transactionDto = transactionDao.getTransactionDetails(iciciResponseDto.getPrn());
+        logger.info("Payment Callback ICICIDvResponseDto######## for ICICI {} ", transactionDto);
+        Order order = orderDao.getOrderDetails(transactionDto);
+        FinalResponseStatus finalResponseStatus = getStatus(transactionDto, order, iciciResponseDto.getPaId() == null ? OtherInbConstants.EMPTY : iciciResponseDto.getPaId().equalsIgnoreCase(OtherInbConstants.ZERO) ? OtherInbConstants.SUCCESS : OtherInbConstants.FAILED, iciciResponseDto.getPaId() == null ? OtherInbConstants.EMPTY : iciciResponseDto.getPaId());
+        return PaymentFinalResponse.builder().mId(transactionDto.getMerchantId() == null ? OtherInbConstants.EMPTY : transactionDto.getMerchantId()).merchantOrderNumber(transactionDto.getOrderRefNumber() == null ? OtherInbConstants.EMPTY : transactionDto.getOrderRefNumber()).sbiOrderId(transactionDto.getSbiOrderRefNumber() == null ? OtherInbConstants.EMPTY : transactionDto.getSbiOrderRefNumber()).orderAmount(String.valueOf(transactionDto.getOrderAmount() == null ? OtherInbConstants.EMPTY : String.valueOf(transactionDto.getOrderAmount()))).totalAmount(String.valueOf(transactionDto.getDebitAmt()) == null ? OtherInbConstants.EMPTY : String.valueOf(transactionDto.getDebitAmt())).atrn(transactionDto.getAtrnNum() == null ? OtherInbConstants.EMPTY : transactionDto.getAtrnNum()).transactionStatus(finalResponseStatus.getStatus()).reason(finalResponseStatus.getResponseReason()).CIN(transactionDto.getCin() == null ? OtherInbConstants.EMPTY : transactionDto.getCin()).otherDetails(order.getOtherDetails() == null ? OtherInbConstants.EMPTY : order.getOtherDetails()).bankName(transactionDto.getChannelBank() == null ? OtherInbConstants.EMPTY : transactionDto.getChannelBank()).bankTxnNumber(iciciResponseDto.getPaId() == null ? OtherInbConstants.EMPTY : iciciResponseDto.getPaId()).bankCode(transactionDto.getPayMode() == null ? OtherInbConstants.EMPTY : transactionDto.getPayMode()).customerId(order.getCustomerId() == null ? OtherInbConstants.EMPTY : order.getCustomerId()).orderRetryCount(String.valueOf(order.getOrderRetryCount()) == null ? OtherInbConstants.EMPTY : String.valueOf(order.getOrderRetryCount())).build();
+    }
+
+    public FinalResponseStatus getStatus(TransactionDto transactionDto, Order order, String channelStatus, String failureReason) {
+        if (!transactionDto.getOrderAmount().equals(order.getOrderAmount())) {
+            return FinalResponseStatus.builder().status(OtherInbConstants.FAILED).responseReason(OtherInbConstants.FAILED_FOR_AMOUNT_NOT_MATCHED).build();
+        } else {
+            return FinalResponseStatus.builder().status(channelStatus).responseReason(failureReason.replaceAll(OtherInbConstants.SPECIAL_CHAR_REGEX, OtherInbConstants.EMPTY)).build();
+        }
+    }
+
+
+    public ICICIResponseDto mapCallBackResponse(ICICIResponseDto iciciResponseDto) {
+        return ICICIResponseDto.builder().atrn(iciciResponseDto.getAtrn()).amount(iciciResponseDto.getAmount()).atrn(iciciResponseDto.getAtrn()).paId(iciciResponseDto.getPaId()).paId(iciciResponseDto.getPaId()).paId(iciciResponseDto.getPaId()).build();
+    }
+
+    private PaymentFinalResponse validateCallBackResponse(ICICIResponseDto iciciResponseDto, ICICIDvResponseDto iciciDVResponseDto) {
+
+        if (!otherInbpaymentValidator.validateWebAndDvAmt(iciciResponseDto.getAmount(), iciciDVResponseDto.getAmount())) {
+            return getRedirectObject(iciciResponseDto);
+        }
+        if (!otherInbpaymentValidator.ValidateBankReferenceNumber(iciciResponseDto.getPrn(), iciciDVResponseDto.getBId())) {
+            return getRedirectObject(iciciResponseDto);
+        }
+        return null;
+    }
+
+    public ICICIDvResponseDto convertDvResponsetoDto(String iciciDvResponse) {
+        logger.info("Payment Callback MapDVResponseDto for ICICI {} ", iciciDvResponse);
+        try {
+            return new ObjectMapper().readValue(iciciDvResponse, ICICIDvResponseDto.class);
+
+        } catch (JsonProcessingException e) {
+            throw new OtherInbPaymentException(ErrorConstants.ICICI_DV_RESPONSE_PROCESS_ERROR_CODE, ErrorConstants.ICICI_DV_RESPONSE_PROCESS_MESSAGE);
+        }
+
+    }
+}
