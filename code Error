@@ -1,5 +1,44 @@
+package com.epay.otherinb.util.encryptdecryptutil;
 
-@RequiredArgsConstructor
+import com.epay.otherinb.dao.OtherInbPaymentDao;
+import com.epay.otherinb.dto.ICICIDvResponseDto;
+import com.epay.otherinb.dto.ICICIResponseDto;
+import com.epay.otherinb.dto.OtherInbChannelUnitMappingDto;
+import com.epay.otherinb.dto.TransactionDto;
+import com.epay.otherinb.exceptions.OtherInbPaymentException;
+import com.epay.otherinb.model.request.PaymentRequest;
+import com.epay.otherinb.model.response.OtherInbPostingData;
+import com.epay.otherinb.model.response.PostingData;
+import com.epay.otherinb.util.OtherInbFormPostingUtil;
+import com.epay.otherinb.util.constants.ErrorConstants;
+import com.epay.otherinb.util.constants.OtherInbConstants;
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+import javax.crypto.BadPaddingException;
+import javax.crypto.Cipher;
+import javax.crypto.IllegalBlockSizeException;
+import javax.crypto.NoSuchPaddingException;
+import javax.crypto.spec.SecretKeySpec;
+import java.io.IOException;
+import java.math.BigDecimal;
+import java.security.InvalidKeyException;
+import java.security.Key;
+import java.security.NoSuchAlgorithmException;
+import java.text.DecimalFormat;
+import java.text.MessageFormat;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
 @Component("ICICIRetailEncryptionDecryptionUtil")
 public class ICICIRetailEncryptionDecryptionUtil {
 
@@ -12,7 +51,25 @@ public class ICICIRetailEncryptionDecryptionUtil {
     @Autowired
     private OtherInbFormPostingUtil otherInbFormPostingUtil;
 
-    public ICICIRetailEncryptionDecryptionUtil(String sMasterKey) throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException {
+    // ------------------------------------------------------------------
+    // FIX #1 (runtime NPE):
+    //   Original had @RequiredArgsConstructor on the class + this explicit
+    //   (String) ctor. Lombok generated a no-arg ctor; Spring preferred it;
+    //   static encryptDecryptKey / c stayed null -> NPE on first encrypt.
+    //
+    //   Fix: removed @RequiredArgsConstructor, added @Autowired here, and
+    //   @Value falls back to the SAME original key so encryption output
+    //   is byte-for-byte unchanged.
+    //
+    //   NOTE: `new ICICIRetailEncryptionDecryptionUtil("uxowYdKK3so2w6Ad")`
+    //   inside encryptedPostedData() still works — @Autowired only
+    //   affects Spring's behaviour, not manual instantiation.
+    // ------------------------------------------------------------------
+    @Autowired
+    public ICICIRetailEncryptionDecryptionUtil(
+            @Value("${icici.master.key:uxowYdKK3so2w6Ad}") String sMasterKey)
+            throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException {
+
         String sKey = "";
         String sAlgorithm = "AES";
         sKey = sMasterKey.trim();
@@ -22,71 +79,116 @@ public class ICICIRetailEncryptionDecryptionUtil {
             byte[] sKeyBytes = sKey.getBytes();
             encryptDecryptKey = (Key) (new SecretKeySpec(sKeyBytes, sAlgorithm));
             c = Cipher.getInstance(sAlgorithm);
-
         }
     }
 
-
     // WEB REQUEST INITIATION METHOD FOR ICICI BANK
-    public OtherInbPostingData processInitiate(PaymentRequest paymentWebRequest, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) throws Exception {
+    public OtherInbPostingData processInitiate(PaymentRequest paymentWebRequest,
+                                               TransactionDto transactionDto,
+                                               OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto)
+            throws Exception {
 
-        DateTimeFormatter dateTime = DateTimeFormatter.ofPattern(OtherInbConstants.TXN_DATETIME_FORMAT); // dd/MM/YYYY HH:mm:ss
+        DateTimeFormatter dateTime = DateTimeFormatter.ofPattern(OtherInbConstants.TXN_DATETIME_FORMAT);
         String txnDateTime = LocalDateTime.now().format(dateTime);
         logger.info("dateTimeString. {} for ICICI Bank ", txnDateTime);
 
-        //Step 1 Plain text checksum request
-        // String  checkSumVal = createChecksum(transactionDto, otherInbChannelUnitMappingDto, txnDateTime);
-
-        //Step 2 Plain text web request + Checksum from step 1
         String planeTextWebReqData = createWebRequest(transactionDto, otherInbChannelUnitMappingDto, txnDateTime);
         logger.info("planeTextWebReqData. {} for  ICICI Bank ", planeTextWebReqData);
-        otherInbPaymentDao.saveRequestLog(planeTextWebReqData, paymentWebRequest.getAtrn(), OtherInbConstants.WEB_REQUEST_TYPE, OtherInbConstants.CREATED_BY_ICICI);
-        otherInbPaymentDao.saveRequestLog(planeTextWebReqData, paymentWebRequest.getAtrn(), OtherInbConstants.WEB_REQUEST_TYPE, OtherInbConstants.CREATED_BY_ICICI);
-        return OtherInbPostingData.builder().atrn(transactionDto.getAtrnNum()).merchIdVal(transactionDto.getMerchantId()).encryptTrans(otherInbFormPostingUtil.getFormPostingData(otherInbFormPostingUtil.getForm_Dhanlaxmi(encryptedPostedData(planeTextWebReqData, otherInbChannelUnitMappingDto, transactionDto).getData(), transactionDto, otherInbChannelUnitMappingDto), otherInbChannelUnitMappingDto, transactionDto)).build();
+
+        // Kept as-is (still duplicated per your instruction — flagged for later cleanup)
+        otherInbPaymentDao.saveRequestLog(planeTextWebReqData, paymentWebRequest.getAtrn(),
+                OtherInbConstants.WEB_REQUEST_TYPE, OtherInbConstants.CREATED_BY_ICICI);
+        otherInbPaymentDao.saveRequestLog(planeTextWebReqData, paymentWebRequest.getAtrn(),
+                OtherInbConstants.WEB_REQUEST_TYPE, OtherInbConstants.CREATED_BY_ICICI);
+
+        return OtherInbPostingData.builder()
+                .atrn(transactionDto.getAtrnNum())
+                .merchIdVal(transactionDto.getMerchantId())
+                .encryptTrans(otherInbFormPostingUtil.getFormPostingData(
+                        otherInbFormPostingUtil.getForm_Dhanlaxmi(
+                                encryptedPostedData(planeTextWebReqData,
+                                        otherInbChannelUnitMappingDto, transactionDto).getData(),
+                                transactionDto, otherInbChannelUnitMappingDto),
+                        otherInbChannelUnitMappingDto, transactionDto))
+                .build();
     }
 
     // WEB REQUEST CREATION METHOD
-    public String createWebRequest(TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto, String txnDateTime) {
-        return MessageFormat.format(String.valueOf(otherInbChannelUnitMappingDto.getWebRequestFormat()), transactionDto.getAtrnNum(), "MSEDCL", transactionDto.getDebitAmt(), transactionDto.getCurrencyCode(), otherInbChannelUnitMappingDto.getChannelReturnUrl(), "Y");
+    public String createWebRequest(TransactionDto transactionDto,
+                                   OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto,
+                                   String txnDateTime) {
+        return MessageFormat.format(
+                String.valueOf(otherInbChannelUnitMappingDto.getWebRequestFormat()),
+                transactionDto.getAtrnNum(), "MSEDCL", transactionDto.getDebitAmt(),
+                transactionDto.getCurrencyCode(),
+                otherInbChannelUnitMappingDto.getChannelReturnUrl(), "Y");
     }
 
-    public PostingData encryptedPostedData(String planeTextWebReqData, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto, TransactionDto transactionDto) throws Exception {
-//        String encWebReqData = iciciEncrypt(planeTextWebReqData, otherInbChannelUnitMappingDto.getCommonEncKey());
-        String encWebReqData = new ICICIRetailEncryptionDecryptionUtil("uxowYdKK3so2w6Ad").iciciEncrypt(planeTextWebReqData);
+    public PostingData encryptedPostedData(String planeTextWebReqData,
+                                           OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto,
+                                           TransactionDto transactionDto) throws Exception {
+        // Kept as-is — manual instance uses the same 16-char key.
+        String encWebReqData = new ICICIRetailEncryptionDecryptionUtil("uxowYdKK3so2w6Ad")
+                .iciciEncrypt(planeTextWebReqData);
         return PostingData.builder().data(encWebReqData).build();
     }
 
-    public String iciciEncrypt(String stringToEncrypt) throws InvalidKeyException, IllegalStateException, IllegalBlockSizeException, BadPaddingException {
+    // ------------------------------------------------------------------
+    // FIX #2 + #4 (compile error + NPE guard):
+    //   sun.misc.BASE64Encoder -> java.util.Base64.getEncoder()
+    //   Output is identical: original strips \n/\r right after anyway.
+    // ------------------------------------------------------------------
+    public String iciciEncrypt(String stringToEncrypt)
+            throws InvalidKeyException, IllegalStateException,
+                   IllegalBlockSizeException, BadPaddingException {
+
+        // ADDED: null guard (prevents NPE from caller)
+        if (stringToEncrypt == null) {
+            throw new IllegalArgumentException("stringToEncrypt must not be null");
+        }
+
         c.init(1, encryptDecryptKey);
-        BASE64Encoder base64encoder = new BASE64Encoder();
-        String sEncString = base64encoder.encode(c.doFinal(stringToEncrypt.getBytes()));
+        String sEncString = Base64.getEncoder()
+                .encodeToString(c.doFinal(stringToEncrypt.getBytes()));
         sEncString = sEncString.replaceAll("\n", "");
         sEncString = sEncString.replaceAll("\r", "");
         return sEncString;
     }
 
-    public String iciciDecrypt(String stringToDecrypt) throws InvalidKeyException, IOException, IllegalStateException, IllegalBlockSizeException, BadPaddingException {
+    // ------------------------------------------------------------------
+    // FIX #3 + #4 (compile error + NPE guard):
+    //   sun.misc.BASE64Decoder -> java.util.Base64.getMimeDecoder()
+    //   getMimeDecoder() tolerates \n/\r exactly like the original
+    //   BASE64Decoder.decodeBuffer() did.
+    // ------------------------------------------------------------------
+    public String iciciDecrypt(String stringToDecrypt)
+            throws InvalidKeyException, IOException, IllegalStateException,
+                   IllegalBlockSizeException, BadPaddingException {
+
+        // ADDED: null guard
+        if (stringToDecrypt == null) {
+            throw new IllegalArgumentException("stringToDecrypt must not be null");
+        }
+
         c.init(2, encryptDecryptKey);
-        BASE64Decoder base64decoder = new BASE64Decoder();
-        byte[] ciphertext = (byte[]) null;
-        byte[] cleartext = base64decoder.decodeBuffer(this.replaceSpecialChars(stringToDecrypt));
-        ciphertext = c.doFinal(cleartext);
+        byte[] cleartext = Base64.getMimeDecoder()
+                .decode(this.replaceSpecialChars(stringToDecrypt));
+        byte[] ciphertext = c.doFinal(cleartext);
         return this.bytes2String(ciphertext);
     }
 
     private String bytes2String(byte[] bytes) {
+        // UNCHANGED
         StringBuffer stringBuffer = new StringBuffer();
-
         for (int i = 0; i < bytes.length; ++i) {
             stringBuffer.append((char) bytes[i]);
         }
-
         return stringBuffer.toString();
     }
 
     private String replaceSpecialChars(String str) {
+        // UNCHANGED
         StringBuffer sb = new StringBuffer();
-
         for (int i = 0; i < str.length(); ++i) {
             if (str.charAt(i) == ' ') {
                 sb.append('+');
@@ -97,67 +199,64 @@ public class ICICIRetailEncryptionDecryptionUtil {
         return sb.toString();
     }
 
+    // ==================================================================
+    // ============  BELOW MARKER — validation added  ===================
+    // ==================================================================
+
+    // FIX #5 (NPE guard):
+    //   decResponse.split(...) throws NPE when decResponse is null.
+    //   Blank check added; existing parsing logic unchanged.
     public Map<String, String> getDecryptedData(String decResponse) {
-        return Optional.of(Arrays.stream(decResponse.split("\\|")).map(kv -> kv.split(OtherInbConstants.PATTERN_EQUAL_TO_CONST)).filter(kvArray -> kvArray.length > 1).collect(Collectors.toMap(kv -> kv[0], kv -> StringUtils.isBlank(kv[1]) ? OtherInbConstants.NA : kv[1].trim()))).orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.WEB_CHECKSUM_ERROR_CODE, ErrorConstants.WEB_CHECKSUM_MISMATCH_ERROR_MESSAGE));
+
+        if (decResponse == null || decResponse.trim().isEmpty()) {
+            throw new OtherInbPaymentException(
+                    ErrorConstants.WEB_CHECKSUM_ERROR_CODE,
+                    ErrorConstants.WEB_CHECKSUM_MISMATCH_ERROR_MESSAGE);
+        }
+
+        return Optional.of(Arrays.stream(decResponse.split("\\|"))
+                        .map(kv -> kv.split(OtherInbConstants.PATTERN_EQUAL_TO_CONST))
+                        .filter(kvArray -> kvArray.length > 1)
+                        .collect(Collectors.toMap(
+                                kv -> kv[0],
+                                kv -> StringUtils.isBlank(kv[1])
+                                        ? OtherInbConstants.NA
+                                        : kv[1].trim())))
+                .orElseThrow(() -> new OtherInbPaymentException(
+                        ErrorConstants.WEB_CHECKSUM_ERROR_CODE,
+                        ErrorConstants.WEB_CHECKSUM_MISMATCH_ERROR_MESSAGE));
     }
 
+    // UNCHANGED (stub — returns null per original)
     public String getDvRespDecryptedData(String encryptedData) throws Exception {
-//        String decryptedWebResponse = iciciDecrypt(encryptedData, "0620c6bca96baa252190504dfd568b8c0a2d146f8ebdb2577bba6f9500f0af84", "add84f1e3b6a74e8609fcdbc");
-//        return decryptedWebResponse;
         return null;
     }
 
+    // FIX #6 (NPE guard):
+    //   amount.setScale(...) throws NPE when amount is null.
+    //   Existing rounding logic unchanged.
     public String formatedAmount(BigDecimal amount) {
+        if (amount == null) {
+            return OtherInbConstants.EMPTY;
+        }
         BigDecimal convertedAmount = amount.setScale(2, BigDecimal.ROUND_UP);
         DecimalFormat df = new DecimalFormat("0.00");
         return df.format(convertedAmount);
     }
 
-
+    // UNCHANGED (stub — returns empty DTO per original)
     public ICICIDvResponseDto processICICIDoubleVerRequest(ICICIResponseDto iciciResponseDto) {
-        //Save DV Response in DB
-//        paymentDao.saveResponseLog(decryptedDVResponse, iciciDvResponseDto.getOrderid(), walletDVResponseDto.getTxid(), PaymentConstants.DV_RESPONSE_TYPE, PaymentConstants.CREATED_BY_WALLET);
-//        // Validation call checksum, bank ref number, amount
-//        //    validateCallBackResponse(walletMapWebResponseDto, walletDVResponseDto); // Check Method...
         ICICIDvResponseDto dto = new ICICIDvResponseDto();
-//        //in web or dv response trace no is null or zero then mark txn as fail.
-//        switch (walletDVResponseDto.getStatuscode()) {
-//            case PaymentConstants.WALLET_STATUS_SUCCESS_CONST -> {
-//                logger.info("Payment Callback DV WALLET SUCCESS_CONST {} " , walletDVResponseDto);
-//                statusUpdatePaymentDao.paymentSuccessPendingStatusUpdateGen(PaymentStatus.SUCCESS.toString(), walletDVResponseDto.getOrderid(),  walletDVResponseDto.getTxid(),PaymentConstants.WALLET_MOBIKWIK_RESPONSE,PaymentConstants.WALLET_CONST);
-//                return walletDVResponseDto;
-//            }
-//            case PaymentConstants.FAILURE_CONST -> {
-//                logger.info("Payment Callback DV WALLET FAILURE_CONST {} " , walletDVResponseDto);
-//                statusUpdatePaymentDao.paymentFailureStatusUpdate(walletDVResponseDto.getOrderid(),walletDVResponseDto.getTxid(),walletDVResponseDto.getStatuscode(),PaymentConstants.WALLET_MOBIKWIK_RESPONSE);
-//                return walletDVResponseDto;
-//            }
-//            default -> {
-//                logger.info("Payment Callback DV WALLET default {} " , walletDVResponseDto);
-//                statusUpdatePaymentDao.paymentFailureStatusUpdate(walletDVResponseDto.getOrderid(),walletDVResponseDto.getTxid(),walletDVResponseDto.getStatusmessage(),PaymentConstants.WALLET_MOBIKWIK_RESPONSE);
         return dto;
     }
 
+    // UNCHANGED (stub — returns dummy string per original)
     public String getCallBackResponse(String mid, String orderid) {
-
-//        // Create checksum
-//        String dvReqData= Arrays.stream(MessageFormat.format(OtherInbConstants.MOBIKWIK_URL_VALUE_DV_REQUEST_CHECKSUM,mid,orderid)
-//                .split("\\|")).map(String :: trim).map(s -> "'"+s +"'").collect(Collectors.joining());
-//        logger.info("Payment Initiation using builder DV: {} createCheckSum: {} atrn: {} for Wallet MobikWik : ", dvReqData,createCheckSum,orderid);
-//        //Create plainText Request String
-//        String plainDvRequestAndChecksum = (MessageFormat.format(OtherInbConstants.MOBIKWIK_URL_VALUE_DV_REQUEST_encrypted,orderid,createCheckSum));
-//        logger.info("Payment Callback Plain Double Verification Request and Checksum {} " + plainDvRequestAndChecksum);
-//        // Save DV Request...
-//        paymentDao.saveRequestLog(plainDvRequestAndChecksum,orderid,OtherInbConstants.DV_REQUEST_TYPE,OtherInbConstants.CREATED_BY_WALLET);
         return "plainDvRequestAndChecksum";
-
     }
 
+    // UNCHANGED (stub — returns "ddf" per original)
     public String processICICIDoubleVerRequest1(ICICIResponseDto MapWebResponseDto) {
-
         return "ddf";
-        //getCallBackResponse(MapWebResponseDto.getMid(),walletMapWebResponseDto.getOrderid());
-
-
     }
 }
