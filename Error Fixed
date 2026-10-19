@@ -1,3 +1,18 @@
+
+
+1. No Errors at All: There are no exceptions, crashes, or error codes in the logs.
+2. Transaction Service: Shows the order was fetched, validation passed, pricing was calculated, and the payment record was successfully saved.
+3. Payment Service: Shows it successfully received the request, built the SBI payload, generated the checksum, and created the encrypted web request.
+4. Correlation IDs: The IDs (81808151... and 566a5fce...) match perfectly across both services, proving they communicated without any network drops.
+5. The decodedSecretKey Line: This is just a normal INFO message. It appears because the system successfully decoded the AES key to encrypt the response.
+6. The "End" of the Log: The logs stop cleanly after the transaction service sends back a status: 1 (Success) response.
+7. Conclusion: The logs show 100% backend success. They do not show the error because the error (the firewall block) happens in the browser after the backend finishes its job.
+
+
+
+
+
+
 The Problem: 
 Our backend code is working perfectly (logs show success), but when the user is redirected to the SBI payment page, SBI’s UAT firewall blocks it. It shows a "URL rejected" error because our website URL is not registered in their system.
 
