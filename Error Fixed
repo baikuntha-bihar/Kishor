@@ -1,1 +1,12 @@
+The Problem: 
+Our backend code is working perfectly (logs show success), but when the user is redirected to the SBI payment page, SBI’s UAT firewall blocks it. It shows a "URL rejected" error because our website URL is not registered in their system.
 
+The Fix:
+
+1. Contact SBI Support and give them these exact details:
+   · Support ID: 14170211602336232592
+   · Merchant ID: 1000890
+2. Ask them to: Whitelist our URL (https://preprod.epay.sbi/...) in their UAT Firewall/MIF settings.
+
+Conclusion: 
+There is no code bug on our side. It is a simple SBI network configuration issue that their team needs to approve.
