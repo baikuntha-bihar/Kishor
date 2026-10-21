@@ -95,3 +95,8 @@ WHERE GTW_MAP_ID = 131;
 [ ] DV request uses correct BID from web response
 [ ] DV response parsed as HTML/link for PmtStatus=Successful
 [ ] Test one success case and one failure case
+
+
+
+5794ED7A8462CAE7E0637D86B10AD17A	131	NB	"PRN={0}&ITC={1}&AMT={2}&CRN="INR"&RU={3}&CG="Y"
+"	PRN={0}&ITC={1}&AMT={2}&CRN="INR"&RU={3}&PAID="Y"&BID={4}	IWQRYTASKOBJNAME={0}&BAY_BANKID={1}&MD={2}&PID={3}&PRN={4}&ITC="ICICI BANK"&AMT={5}&CRU_CONSTRN="INR"&BID={6}	IWQRYTASKOBJNAME={0}&BAY_BANKID={1}&MD={2}&PID={3}&PRN={4}&ITC="ICICI BANK"&AMT={5}&CRU_CONSTRN="INR"&BID={6}	YES	PAYMENT		iciciEncrypt	iciciDecrypt	https://uat.sbiepay.sbi/payagg/AggICICINetBankingGatewayServlet				uxowYdKK3so2w6Ad		uxowYdKK3so2w6Ad				system	system	172333333333	172333333333	A	ok	https://cibnext.icicibank.com/corp/BANKAWAY	https://shopping.icicibank.com/corp/BANKAWAY		PGh0bWw+Cjxib2R5IG9ubG9hZD1kb2N1bWVudC5mb3Jtc1swXS5zdWJtaXQoKT4KPGZvcm0KbWV0aG9kPSIke01FVEhPRH0iCmFjdGlvbj0iJHtBQ1RJT05fVVJMfSI+CjxpbnB1dCB0eXBlPSJoaWRkZW4iIG5hbWU9IkJBWV9CQU5LSUQiIHZhbHVlPSIke0JBWV9CQU5LSUR9Ij4KPGlucHV0IHR5cGU9ImhpZGRlbiIgbmFtZT0iTUQiIHZhbHVlPSIke01EfSI+CjxpbnB1dCB0eXBlPSJoaWRkZW4iIG5hbWU9IlBJRCIgdmFsdWU9IiR7UElEfSI+CjxpbnB1dCB0eXBlPSJoaWRkZW4iIG5hbWU9IlNQSUQiIHZhbHVlPSIke1NQSUR9Ij4KPGlucHV0IHR5cGU9ImhpZGRlbiIgbmFtZT0iRVMiIHZhbHVlPSIke0VOQ19EQVRBfSI+CjwvZm9ybT4KPC9ib2R5Pgo8L2h0bWw+	POST	processInitiate	ICICIRetailEncryptionDecryptionUtil			
