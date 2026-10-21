@@ -4,7 +4,7 @@ import com.epay.otherinb.config.OtherInbConfigDetails;
 import com.epay.otherinb.exceptions.OtherInbPaymentException;
 import com.epay.otherinb.util.constants.ErrorConstants;
 import com.epay.otherinb.util.constants.OtherInbConstants;
-import com.epay.otherinb.util.encryptdecryptutil.DhanaLaxmiRetailCorpEncryptionDecryptionUtil;
+import com.epay.otherinb.util.encryptdecryptutil.ICICIRetailEncryptionDecryptionUtil;
 import com.sbi.epay.logging.utility.LoggerFactoryUtility;
 import com.sbi.epay.logging.utility.LoggerUtility;
 import lombok.RequiredArgsConstructor;
@@ -18,47 +18,53 @@ import java.time.Duration;
 import java.util.Optional;
 import java.util.function.Supplier;
 
-
 @RequiredArgsConstructor
 @Component
-public class DhanalaxmiPaymentWebClientService {
+public class ICICIPaymentWebClientService {
+
+    // 1. Matched Dhanalaxmi style: removed 'private final' from logger
     LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
     private final OtherInbConfigDetails otherInbConfigDetails;
-    private final DhanaLaxmiRetailCorpEncryptionDecryptionUtil dhanaLaxmiRetailCorpEncryptionDecryptionUtil;
-
+    
+    // 2. Removed the ICICIRetailEncryptionDecryptionUtil from constructor injection
+    // to prevent the Spring startup failure caused by the String requirement.
 
     public String processingDoubleVerRequest(String plainDvRequestAndChecksum) {
-
         try {
+            // 3. Matching Dhanalaxmi's inline style. We instantiate it here and pass the key directly.
+            // NOTE: Replace "1234567890123456" with your actual 16-character key.
+            ICICIRetailEncryptionDecryptionUtil iciciUtil = new ICICIRetailEncryptionDecryptionUtil("1234567890123456");
 
-            String encryptedDVData = DhanaLaxmiRetailCorpEncryptionDecryptionUtil.encryptDhanalaxmiRetail(plainDvRequestAndChecksum, "0620c6bca96baa252190504dfd568b8c0a2d146f8ebdb2577bba6f9500f0af84", "add84f1e3b6a74e8609fcdbc");
+            String encryptedDVData = iciciUtil.iciciEncrypt(plainDvRequestAndChecksum);
+            
+            // Matched Dhanalaxmi's exact logging concatenation style
             logger.info("Payment Callback Encrypted and Encoded Double Verification {} " + encryptedDVData);
 
-
-            String DVResponse = Optional.ofNullable(DhanalaxmiDVResponseConn(otherInbConfigDetails.getMerchantResponseView(), (OtherInbConstants.DHANALAXMI_MERCH_CODE_CONST_URL).concat("mid").concat(OtherInbConstants.DHANALAXMI_ENC_DATA).concat(encryptedDVData))).filter(x -> !x.isEmpty()).orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.DOUBLE_VERIFICATION_ERROR_CODE, ErrorConstants.DOUBLE_VERIFICATION_ERROR_MESSAGE));
+            // Matched Dhanalaxmi's exact Optional filtering and exception throwing
+            String DVResponse = Optional.ofNullable(ICICIDVResponseConn(otherInbConfigDetails.getMerchantResponseView(), (OtherInbConstants.ICICI_MERCH_CODE_CONST_URL).concat("mid").concat(OtherInbConstants.ICICI_ENC_DATA).concat(encryptedDVData))).filter(x -> !x.isEmpty()).orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.DOUBLE_VERIFICATION_ERROR_CODE, ErrorConstants.DOUBLE_VERIFICATION_ERROR_MESSAGE));
+            
             logger.info("Payment Callback Encrypted Double Verification Response {} ", DVResponse);
 
-//            String decryptedDVResponse = URLDecoder.decode(DhanaUtil.decrypt(DVResponse.trim().replaceAll(PaymentConstants.NEW_LINE_REGEX, PaymentConstants.PATTERN_EMPTY).replace(PaymentConstants.PATTERN_SPACE, PaymentConstants.PATTERN_EMPTY), otherInbConfigDetails.getEncryptionKey()), StandardCharsets.UTF_8);
-//            logger.info("Payment Callback Decrypted and Decode Double Verification Response {} ", decryptedDVResponse);
-            //       return decryptedDVResponse;
             return DVResponse;
-        } catch (Exception e) { // Exception throw by INB Bank Algorithm
+        } catch (Exception e) { // Matched Dhanalaxmi's exact catch block (no specific exception catch)
             logger.error("Exception While processingDoubleVerRequest  {}", e);
             throw new OtherInbPaymentException(ErrorConstants.DOUBLE_VERIFICATION_ERROR_CODE, ErrorConstants.DOUBLE_VERIFICATION_ERROR_MESSAGE);
         }
     }
 
-    public String DhanalaxmiDVResponseConn(String bankdvurl, String encryptedData) {
-        logger.info("Dhanalaxmi DV Request posting parameters DV Url {} and encryptedData {} ", bankdvurl + encryptedData);
-        LoggerUtility logger = LoggerFactoryUtility.getLogger(DhanalaxmiPaymentWebClientService.class);
+    public String ICICIDVResponseConn(String bankdvurl, String encryptedData) {
+        // Matched Dhanalaxmi's exact logging concatenation
+        logger.info("Other INB DV Request posting parameters DV Url {} and encryptedData {} ", bankdvurl + encryptedData);
+        
+        // Matched Dhanalaxmi's local logger shadowing
+        LoggerUtility logger = LoggerFactoryUtility.getLogger(ICICIPaymentWebClientService.class);
 
         logger.info("Other INB DV Request posting parameters DV Url {} and encryptedData {} ", bankdvurl, encryptedData);
         try {
-
             WebClient webClient = WebClient.builder().baseUrl(bankdvurl).build();
             logger.info("webClient URL for other INB {} ", webClient);
 
-
+            // 4. Matched Dhanalaxmi's exact WebClient error handling flow, including the Supplier cast
             return webClient.post().header(OtherInbConstants.REQUESTPROPERTY, OtherInbConstants.URL_ENCODED_CONTENT_TYPE).bodyValue(encryptedData).retrieve().onStatus(status -> {
                 logger.info("DV Response received status for other INB {} ", status);
                 return !status.is2xxSuccessful();
@@ -70,72 +76,9 @@ public class DhanalaxmiPaymentWebClientService {
                 logger.info("error responseCode for other INB {} ", error);
                 return Mono.error(() -> new OtherInbPaymentException(ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE, MessageFormat.format(ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE, OtherInbConstants.OTHER_INB_SERVICE)));
             }).retryWhen(Retry.fixedDelay(3, Duration.ofSeconds(1)).filter(throwable -> throwable instanceof OtherInbPaymentException).doBeforeRetry(retrySignal -> logger.info("Retrying attempt {} due to error: {}", retrySignal.totalRetries() + 1, retrySignal.failure().getMessage()))).block();
-        } catch (Exception e) { // Exception throw by INB Bank Algorithm
+        } catch (Exception e) { 
             logger.error("Exception While otherINBDVResponseConn  {}", e);
             throw new OtherInbPaymentException(ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE, MessageFormat.format(ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE, OtherInbConstants.OTHER_INB_SERVICE));
         }
     }
 }
-==========================================================================================================================================
-package com.epay.otherinb.externalservice;
-
-import com.epay.otherinb.config.OtherInbConfigDetails;
-import com.epay.otherinb.exceptions.OtherInbPaymentException;
-import com.epay.otherinb.util.constants.ErrorConstants;
-import com.epay.otherinb.util.constants.OtherInbConstants;
-import com.epay.otherinb.util.encryptdecryptutil.ICICIRetailEncryptionDecryptionUtil;
-import com.sbi.epay.logging.utility.LoggerFactoryUtility;
-import com.sbi.epay.logging.utility.LoggerUtility;
-import lombok.RequiredArgsConstructor;
-import org.springframework.stereotype.Component;
-import org.springframework.util.StringUtils;
-import org.springframework.web.reactive.function.client.WebClient;
-import reactor.core.publisher.Mono;
-import reactor.util.retry.Retry;
-
-import java.text.MessageFormat;
-import java.time.Duration;
-import java.util.Optional;
-
-@Component
-@RequiredArgsConstructor
-public class ICICIPaymentWebClientService {
-
-    private final LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
-    private final OtherInbConfigDetails otherInbConfigDetails;
-    private final ICICIRetailEncryptionDecryptionUtil iciciRetailEncryptionDecryptionUtil;
-
-    public String processingDoubleVerRequest(String plainDvRequestAndChecksum) {
-        try {
-            String encryptedDVData = iciciRetailEncryptionDecryptionUtil.iciciEncrypt(plainDvRequestAndChecksum);
-            logger.info("Payment Callback Encrypted and Encoded Double Verification {} ", encryptedDVData);
-            String DVResponse = Optional.ofNullable(ICICIDVResponseConn(otherInbConfigDetails.getMerchantResponseView(), (OtherInbConstants.ICICI_MERCH_CODE_CONST_URL).concat("mid").concat(OtherInbConstants.ICICI_ENC_DATA).concat(encryptedDVData))).filter(StringUtils::hasText).orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.DOUBLE_VERIFICATION_ERROR_CODE, ErrorConstants.DOUBLE_VERIFICATION_ERROR_MESSAGE));
-
-            logger.info("Payment Callback Encrypted Double Verification Response {} ", DVResponse);
-            return DVResponse;
-        } catch (OtherInbPaymentException e) {
-            throw e;
-        } catch (Exception e) {
-            logger.error("Exception While processingDoubleVerRequest  {}", e);
-            throw new OtherInbPaymentException(ErrorConstants.DOUBLE_VERIFICATION_ERROR_CODE, ErrorConstants.DOUBLE_VERIFICATION_ERROR_MESSAGE);
-        }
-    }
-
-    public String ICICIDVResponseConn(String bankdvurl, String encryptedData) {
-        logger.info("Other INB DV Request posting parameters DV Url {} and encryptedData {} ", bankdvurl, encryptedData);
-        try {
-            WebClient webClient = WebClient.builder().baseUrl(bankdvurl).build();
-            logger.info("webClient URL for other INB {} ", bankdvurl);
-
-            return webClient.post().header(OtherInbConstants.REQUESTPROPERTY, OtherInbConstants.URL_ENCODED_CONTENT_TYPE).bodyValue(encryptedData).retrieve().onStatus(status -> !status.is2xxSuccessful(), clientResponse -> clientResponse.bodyToMono(String.class).flatMap(errorBody -> Mono.error(new OtherInbPaymentException(ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE, MessageFormat.format(ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE, OtherInbConstants.SBI_INB_SERVICE))))).bodyToMono(String.class).doOnNext(body -> logger.info("responseCode for other INB {} ", body)).doOnError(error -> logger.info("error responseCode for other INB {} ", error)).onErrorResume(error -> {
-                logger.info("error responseCode for other INB {} ", error);
-                return Mono.error(() -> new OtherInbPaymentException(ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE, MessageFormat.format(ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE, OtherInbConstants.OTHER_INB_SERVICE)));
-            }).retryWhen(Retry.fixedDelay(3, Duration.ofSeconds(1)).filter(t -> t instanceof OtherInbPaymentException).doBeforeRetry(rs -> logger.info("Retrying attempt {} due to error: {}", rs.totalRetries() + 1, rs.failure().getMessage()))).block();
-        } catch (Exception e) {
-            logger.error("Exception While otherINBDVResponseConn  {}", e);
-            throw new OtherInbPaymentException(ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE, MessageFormat.format(ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE, OtherInbConstants.OTHER_INB_SERVICE));
-        }
-    }
-}
-
-
