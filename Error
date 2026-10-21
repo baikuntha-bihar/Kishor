@@ -1,269 +1,70 @@
-package com.epay.otherinb.util.encryptdecryptutil;
+web req:-
+PRN=Maharashtra State Electricity Distribution Company Limited0460951106955&ITC=0460951106955&AMT=1860.00&CRN=INR&RU=%22https://www.sbiepay.sbi/payagg/AggICICINetBankingGatewayServlet%22&CG=Y
 
-import com.epay.otherinb.dao.OtherInbPaymentDao;
-import com.epay.otherinb.dto.ICICIDvResponseDto;
-import com.epay.otherinb.dto.ICICIResponseDto;
-import com.epay.otherinb.dto.OtherInbChannelUnitMappingDto;
-import com.epay.otherinb.dto.OtherInbPostingData;
-import com.epay.otherinb.dto.PaymentRequest;
-import com.epay.otherinb.dto.PostingData;
-import com.epay.otherinb.dto.TransactionDto;
-import com.epay.otherinb.exceptions.OtherInbPaymentException;
-import com.epay.otherinb.util.OtherInbFormPostingUtil;
-import com.epay.otherinb.util.constants.ErrorConstants;
-import com.epay.otherinb.util.constants.OtherInbConstants;
-import com.sbi.epay.logging.utility.LoggerFactoryUtility;
-import com.sbi.epay.logging.utility.LoggerUtility;
-import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Component;
-import org.springframework.util.StringUtils;
+PRN={0}&ITC={1}&AMT={2}&CRN="INR"&RU={3}&CG="Y"
 
-import javax.crypto.BadPaddingException;
-import javax.crypto.Cipher;
-import javax.crypto.IllegalBlockSizeException;
-import javax.crypto.NoSuchPaddingException;
-import javax.crypto.spec.SecretKeySpec;
-import java.io.IOException;
-import java.math.BigDecimal;
-import java.security.InvalidKeyException;
-import java.security.Key;
-import java.security.NoSuchAlgorithmException;
-import java.text.DecimalFormat;
-import java.text.MessageFormat;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
-import java.util.Arrays;
-import java.util.Map;
-import java.util.Optional;
-import java.util.stream.Collectors;
-import sun.misc.BASE64Decoder;
-import sun.misc.BASE64Encoder;
+web res:-
+PRN=Maharashtra State Electricity Distribution Company Limited0460951106955ITC=0460951106955AMT=1860.00CRN=INRPAID=YBID=1241769591
 
-@RequiredArgsConstructor
-@Component("ICICIRetailEncryptionDecryptionUtil")
-public class ICICIRetailEncryptionDecryptionUtil {
-    
-    private static Cipher c;
-    private static String sAlgorithm;
-    private static Key encryptDecryptKey;
-    
-    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
-    
-    @Autowired
-    private OtherInbPaymentDao otherInbPaymentDao;
-    
-    @Autowired
-    private OtherInbFormPostingUtil otherInbFormPostingUtil;
+PRN={0}&ITC={1}&AMT={2}&CRN="INR"&RU={3}&PAID="Y"&BID={4}
 
-    @Autowired
-    public ICICIRetailEncryptionDecryptionUtil(String sMasterKey) throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException {
-        String sKey = "";
-        String sAlgorithm = "AES";
-        sKey = sMasterKey.trim();
-        if (sKey.length() != 16) {
-            throw new InvalidKeyException("12123412432432423423");
-        } else {
-            byte[] sKeyBytes = sKey.getBytes();
-            encryptDecryptKey = (Key) (new SecretKeySpec(sKeyBytes, sAlgorithm));
-            c = Cipher.getInstance(sAlgorithm);
-        }
-    }
+dv req:-
+IWQRYTASKOBJNAME=bay_mc_login&BAY_BANKID=ICI&MD=V&PID=000000001281&PRN=Maharashtra State Electricity Distribution Company Limited0460951106955&ITC=0460951106955&AMT=1860.00&CRN=INR&BID=1241769591
 
-    // WEB REQUEST INITIATION METHOD FOR ICICI BANK
-    public OtherInbPostingData processInitiate(PaymentRequest paymentWebRequest, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) throws Exception {
-        DateTimeFormatter dateTime = DateTimeFormatter.ofPattern(OtherInbConstants.TXN_DATETIME_FORMAT); // dd/MM/YYYY HH:mm:ss
-        String txnDateTime = LocalDateTime.now().format(dateTime);
-        logger.info("dateTimeString. {} for ICICI Bank ", txnDateTime);
-        
-        //Step 2 Plain text web request + Checksum from step 1
-        String planeTextWebReqData = createWebRequest(transactionDto, otherInbChannelUnitMappingDto, txnDateTime);
-        logger.info("planeTextWebReqData. {} for  ICICI Bank ", planeTextWebReqData);
-        
-        otherInbPaymentDao.saveRequestLog(planeTextWebReqData, paymentWebRequest.getAtrn(), OtherInbConstants.WEB_REQUEST_TYPE, OtherInbConstants.CREATED_BY_ICICI);
-        otherInbPaymentDao.saveRequestLog(planeTextWebReqData, paymentWebRequest.getAtrn(), OtherInbConstants.WEB_REQUEST_TYPE, OtherInbConstants.CREATED_BY_ICICI);
-        
-        return OtherInbPostingData.builder()
-                .atrn(transactionDto.getAtrnNum())
-                .merchIdVal(transactionDto.getMerchantId())
-                .encryptTrans(otherInbFormPostingUtil.getFormPostingData(
-                        otherInbFormPostingUtil.getForm_Dhanlaxmi(
-                                encryptedPostedData(planeTextWebReqData, otherInbChannelUnitMappingDto, transactionDto).getData(), 
-                                transactionDto, 
-                                otherInbChannelUnitMappingDto), 
-                        otherInbChannelUnitMappingDto, 
-                        transactionDto))
-                .build();
-    }
+IWQRYTASKOBJNAME={0}&BAY_BANKID={1}&MD={2}&PID={3}&PRN={4}&ITC="ICICI BANK"&AMT={5}&CRU_CONSTRN="INR"&BID={6}
 
-    // WEB REQUEST CREATION METHOD
-    public String createWebRequest(TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto, String txnDateTime) {
-        return MessageFormat.format(String.valueOf(otherInbChannelUnitMappingDto.getWebRequestFormat()), transactionDto.getAtrnNum(), "MSEDCL", transactionDto.getDebitAmt(), transactionDto.getCurrencyCode(), otherInbChannelUnitMappingDto.getChannelReturnUrl(), "Y");
-    }
-
-    public PostingData encryptedPostedData(String planeTextWebReqData, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto, TransactionDto transactionDto) throws Exception {
-//        String encWebReqData = iciciEncrypt(planeTextWebReqData, otherInbChannelUnitMappingDto.getCommonEncKey());
-        String encWebReqData = new ICICIRetailEncryptionDecryptionUtil("12344566544433786").iciciEncrypt(planeTextWebReqData);
-        return PostingData.builder().data(encWebReqData).build();
-    }
-
-    public String iciciEncrypt(String stringToEncrypt) throws InvalidKeyException, IllegalStateException, IllegalBlockSizeException, BadPaddingException {
-        c.init(1, encryptDecryptKey);
-        BASE64Encoder base64encoder = new BASE64Encoder();
-        String sEncString = base64encoder.encode(c.doFinal(stringToEncrypt.getBytes()));
-        sEncString = sEncString.replaceAll("\n", "");
-        sEncString = sEncString.replaceAll("\r", "");
-        return sEncString;
-    }
-
-    public String iciciDecrypt(String stringToDecrypt) throws InvalidKeyException, IOException, IllegalStateException, IllegalBlockSizeException, BadPaddingException {
-        c.init(2, encryptDecryptKey);
-        BASE64Decoder base64decoder = new BASE64Decoder();
-        byte[] ciphertext = (byte[]) null;
-        byte[] cleartext = base64decoder.decodeBuffer(this.replaceSpecialChars(stringToDecrypt));
-        ciphertext = c.doFinal(cleartext);
-        return this.bytes2String(ciphertext);
-    }
-
-    private String bytes2String(byte[] bytes) {
-        StringBuffer stringBuffer = new StringBuffer();
-        for (int i = 0; i < bytes.length; ++i) {
-            stringBuffer.append((char) bytes[i]);
-        }
-        return stringBuffer.toString();
-    }
-
-    private String replaceSpecialChars(String str) {
-        StringBuffer sb = new StringBuffer();
-        for (int i = 0; i < str.length(); ++i) {
-            if (str.charAt(i) == ' ') {
-                sb.append('+');
-            } else {
-                sb.append(str.charAt(i));
-            }
-        }
-        return sb.toString();
-    }
-
-    public Map<String, String> getDecryptedData(String decResponse) {
-        if (decResponse == null || decResponse.trim().isEmpty()) {
-            throw new OtherInbPaymentException(ErrorConstants.WEB_CHECKSUM_ERROR_CODE, ErrorConstants.WEB_CHECKSUM_MISMATCH_ERROR_MESSAGE);
-        }
-        return Optional.of(Arrays.stream(decResponse.split("\\|"))
-                .map(kv -> kv.split(OtherInbConstants.PATTERN_EQUAL_TO_CONST))
-                .filter(kvArray -> kvArray.length > 1)
-                .collect(Collectors.toMap(kv -> kv[0], kv -> StringUtils.hasText(kv[1]) ? kv[1].trim() : OtherInbConstants.NA)))
-                .orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.WEB_CHECKSUM_ERROR_CODE, ErrorConstants.WEB_CHECKSUM_MISMATCH_ERROR_MESSAGE));
-    }
-
-    public String getDvRespDecryptedData(String encryptedData) throws Exception {
-        return null;
-    }
-
-    public String formatedAmount(BigDecimal amount) {
-        if (amount == null) {
-            return OtherInbConstants.EMPTY;
-        }
-        BigDecimal convertedAmount = amount.setScale(2, BigDecimal.ROUND_UP);
-        DecimalFormat df = new DecimalFormat("0.00");
-        return df.format(convertedAmount);
-    }
-
-    public ICICIDvResponseDto processICICIDoubleVerRequest(ICICIResponseDto iciciResponseDto) {
-        ICICIDvResponseDto dto = new ICICIDvResponseDto();
-        return dto;
-    }
-
-    public String getCallBackResponse(String mid, String orderid) {
-        return "plainDvRequestAndChecksum";
-    }
-
-    public String processICICIDoubleVerRequest1(ICICIResponseDto MapWebResponseDto) {
-        return "ddf";
-    }
-}
+dv res:-
 
 
-===========
-package com.epay.otherinb.externalservice;
+iciciDvurlConn : Before Retry POST Response Code ::200 ,for 0460951106955
+In iciciDvurlConn response:<table BORDER="4" WIDTH="100%" CELLPADDING="0" CELLSPACING="0" BGCOLOR="#000000"><tr><td><FONT FACE="ARIAL,MONACO" SIZE=+1 COLOR="#00FF00">Your Payment is Successful</FONT>&nbsp;</td></tr></table><p><a href='null?PRN=MaharashtraStateElectricityDistributionCompanyLimited0460951106955&PID=000000001281&BID=1241769591&AMT=1860.00&CRN=INR&BankId=026&MD=V&PmtStatus=Successful&ITC=0460951106955'>Return to Shopping Site</a><p> ,for 0460951106955
+Double Verificaation xmlResult : <table BORDER="4" WIDTH="100%" CELLPADDING="0" CELLSPACING="0" BGCOLOR="#000000"><tr><td><FONT FACE="ARIAL,MONACO" SIZE=+1 COLOR="#00FF00">Your Payment is Successful</FONT>&nbsp;</td></tr></table><p><a href='null?PRN=MaharashtraStateElectricityDistributionCompanyLimited0460951106955&PID=000000001281&BID=1241769591&AMT=1860.00&CRN=INR&BankId=026&MD=V&PmtStatus=Successful&ITC=0460951106955'>Return to Shopping Site</a><p>
 
-import com.epay.otherinb.config.OtherInbConfigDetails;
-import com.epay.otherinb.exceptions.OtherInbPaymentException;
-import com.epay.otherinb.util.constants.ErrorConstants;
-import com.epay.otherinb.util.constants.OtherInbConstants;
-import com.epay.otherinb.util.encryptdecryptutil.ICICIRetailEncryptionDecryptionUtil;
-import com.sbi.epay.logging.utility.LoggerFactoryUtility;
-import com.sbi.epay.logging.utility.LoggerUtility;
-import lombok.RequiredArgsConstructor;
-import org.springframework.stereotype.Component;
-import org.springframework.web.reactive.function.client.WebClient;
-import reactor.core.publisher.Mono;
-import reactor.util.retry.Retry;
 
-import java.text.MessageFormat;
-import java.time.Duration;
-import java.util.Optional;
-import java.util.function.Supplier;
 
-@RequiredArgsConstructor
-@Component
-public class ICICIPaymentWebClientService {
 
-    // Matched Dhanalaxmi style: removed 'private final' from logger
-    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
-    
-    private final OtherInbConfigDetails otherInbConfigDetails;
-    
-    // Spring now injects this successfully because of the ICICIConfig.java String bean
-    private final ICICIRetailEncryptionDecryptionUtil iciciRetailEncryptionDecryptionUtil;
+2026-10-21 18:13:13.722 INFO | com.epay.otherinb.service.OtherInbPaymentService:72 | principal=  | scenario= | operation= | correlation= | methodName=processInitiation | otherInbChannelUnitMappingDto. OtherInbChannelUnitMappingDto(gtwMapId=131, payMode=NB, webRequestFormat=PRN="Maharashtra State Electricity Distribution Company Limited"&ITC={0}&AMT={1}&CRN="INR"&RU={2}&CG="Y", webResponseFormat=PRN="Maharashtra State Electricity Distribution Company Limited"&ITC={0}&AMT={1}&CRN="INR"&RU={2}&PAID="Y"&BID={3}, veriRequestFormat=IWQRYTASKOBJNAME={0}&BAY_BANKID={1}&MD={2}&PID={3}&PRN={4}&ITC="ICICI BANK"&AMT={5}&CRU_CONSTRN="INR"&BID={6}, veriResponseFormat=IWQRYTASKOBJNAME={0}&BAY_BANKID={1}&MD={2}&PID={3}&PRN={4}&ITC="ICICI BANK"&AMT={5}&CRU_CONSTRN="INR"&BID={6}, fromPostingFormat=YES, unitType=PAYMENT, unitName=null, encMethodName=iciciEncrypt, decMethodName=iciciDecrypt, channelReturnUrl=https://uat.sbiepay.sbi/payagg/AggICICINetBankingGatewayServlet, checksumMethodName=null, checksumType=null, checksumValue=null, commonEncKey=uxowYdKK3so2w6Ad, commonEncKeyIv=null, webEncKey=uxowYdKK3so2w6Ad, webEncKeyIv=null, veriEncKey=null, veriEncKeyIv=null, createdBy=system, updatedBy=system, updatedDate=172333333333, createdDate=172333333333, status=A, remarks=ok, bankUrl=https://cibnext.icicibank.com/corp/BANKAWAY, dvUrl=https://shopping.icicibank.com/corp/BANKAWAY, tokenUrl=null, formPostingTemplate=PGh0bWw+Cjxib2R5IG9ubG9hZD1kb2N1bWVudC5mb3Jtc1swXS5zdWJtaXQoKT4KPGZvcm0KbWV0aG9kPSIke01FVEhPRH0iCmFjdGlvbj0iJHtBQ1RJT05fVVJMfSI+CjxpbnB1dCB0eXBlPSJoaWRkZW4iIG5hbWU9IkJBWV9CQU5LSUQiIHZhbHVlPSIke0JBWV9CQU5LSUR9Ij4KPGlucHV0IHR5cGU9ImhpZGRlbiIgbmFtZT0iTUQiIHZhbHVlPSIke01EfSI+CjxpbnB1dCB0eXBlPSJoaWRkZW4iIG5hbWU9IlBJRCIgdmFsdWU9IiR7UElEfSI+CjxpbnB1dCB0eXBlPSJoaWRkZW4iIG5hbWU9IlNQSUQiIHZhbHVlPSIke1NQSUR9Ij4KPGlucHV0IHR5cGU9ImhpZGRlbiIgbmFtZT0iRVMiIHZhbHVlPSIke0VOQ19EQVRBfSI+CjwvZm9ybT4KPC9ib2R5Pgo8L2h0bWw+, formPostingMethod=POST, bankRoutingClass=ICICIRetailEncryptionDecryptionUtil, bankRoutingMethod=processInitiate)
+2026-10-21 18:13:13.734 INFO | com.epay.otherinb.util.encryptdecryptutil.ICICIRetailEncryptionDecryptionUtil:83 | principal=  | scenario= | operation= | correlation= | methodName=processInitiate | dateTimeString. 21/10/2026 18:13:13 for ICICI Bank 
+2026-10-21 18:13:13.735 INFO | com.epay.otherinb.util.encryptdecryptutil.ICICIRetailEncryptionDecryptionUtil:87 | principal=  | scenario= | operation= | correlation= | methodName=processInitiate | planeTextWebReqData. PRN="Maharashtra State Electricity Distribution Company Limited"&ITC=NB003174366193371259&AMT=MSEDCL&CRN="INR"&RU=6.18&CG="Y" for  ICICI Bank 
 
-    public String processingDoubleVerRequest(String plainDvRequestAndChecksum) {
-        try {
-            // Using the injected bean
-            String encryptedDVData = iciciRetailEncryptionDecryptionUtil.iciciEncrypt(plainDvRequestAndChecksum);
-            
-            // Matched Dhanalaxmi's exact logging concatenation style
-            logger.info("Payment Callback Encrypted and Encoded Double Verification {} " + encryptedDVData);
 
-            // Matched Dhanalaxmi's exact Optional filtering and exception throwing
-            String DVResponse = Optional.ofNullable(ICICIDVResponseConn(otherInbConfigDetails.getMerchantResponseView(), (OtherInbConstants.ICICI_MERCH_CODE_CONST_URL).concat("mid").concat(OtherInbConstants.ICICI_ENC_DATA).concat(encryptedDVData))).filter(x -> !x.isEmpty()).orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.DOUBLE_VERIFICATION_ERROR_CODE, ErrorConstants.DOUBLE_VERIFICATION_ERROR_MESSAGE));
-            
-            logger.info("Payment Callback Encrypted Double Verification Response {} ", DVResponse);
 
-            return DVResponse;
-        } catch (Exception e) { // Matched Dhanalaxmi's exact catch block
-            logger.error("Exception While processingDoubleVerRequest  {}", e);
-            throw new OtherInbPaymentException(ErrorConstants.DOUBLE_VERIFICATION_ERROR_CODE, ErrorConstants.DOUBLE_VERIFICATION_ERROR_MESSAGE);
-        }
-    }
 
-    public String ICICIDVResponseConn(String bankdvurl, String encryptedData) {
-        // Matched Dhanalaxmi's exact logging concatenation
-        logger.info("Other INB DV Request posting parameters DV Url {} and encryptedData {} ", bankdvurl + encryptedData);
-        
-        // Matched Dhanalaxmi's local logger shadowing
-        LoggerUtility logger = LoggerFactoryUtility.getLogger(ICICIPaymentWebClientService.class);
 
-        logger.info("Other INB DV Request posting parameters DV Url {} and encryptedData {} ", bankdvurl, encryptedData);
-        try {
-            WebClient webClient = WebClient.builder().baseUrl(bankdvurl).build();
-            logger.info("webClient URL for other INB {} ", webClient);
 
-            // Matched Dhanalaxmi's exact WebClient error handling flow, including the Supplier cast
-            return webClient.post().header(OtherInbConstants.REQUESTPROPERTY, OtherInbConstants.URL_ENCODED_CONTENT_TYPE).bodyValue(encryptedData).retrieve().onStatus(status -> {
-                logger.info("DV Response received status for other INB {} ", status);
-                return !status.is2xxSuccessful();
-            }, clientResponse -> clientResponse.bodyToMono(String.class).flatMap(errorBody -> Mono.error(((Supplier<RuntimeException>) () -> new OtherInbPaymentException(ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE, MessageFormat.format(ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE, OtherInbConstants.SBI_INB_SERVICE))).get()))).bodyToMono(String.class).doOnNext(body -> {
-                logger.info("responseCode for other INB {} ", body);
-            }).doOnError(error -> {
-                logger.info("error responseCode for other INB {} ", error);
-            }).onErrorResume(error -> {
-                logger.info("error responseCode for other INB {} ", error);
-                return Mono.error(() -> new OtherInbPaymentException(ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE, MessageFormat.format(ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE, OtherInbConstants.OTHER_INB_SERVICE)));
-            }).retryWhen(Retry.fixedDelay(3, Duration.ofSeconds(1)).filter(throwable -> throwable instanceof OtherInbPaymentException).doBeforeRetry(retrySignal -> logger.info("Retrying attempt {} due to error: {}", retrySignal.totalRetries() + 1, retrySignal.failure().getMessage()))).block();
-        } catch (Exception e) { 
-            logger.error("Exception While otherINBDVResponseConn  {}", e);
-            throw new OtherInbPaymentException(ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE, MessageFormat.format(ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE, OtherInbConstants.OTHER_INB_SERVICE));
-        }
-    }
-}
+
+ID
+GTW_MAP_ID
+PAY_MODE:NB 
+WEB_REQUEST_FORMAT
+WEB_RESPONSE_FORMAT
+VERI_REQUEST_FORMAT
+VERI_RESPONSE_FORMAT
+FROM_POSTING_FORMAT
+UNIT_TYPE
+UNIT_NAME
+ENC_METHOD_NAME
+DEC_METHOD_NAME
+CHANNEL_RETURN_URL
+CHECKSUM_METHOD_NAME
+CHECKSUM_TYPE
+CHECKSUM_VALUE
+COMMON_ENC_KEY
+COMMON_ENC_KEY_IV
+WEB_ENC_KEY
+WEB_ENC_KEYIV
+VERI_EN_CKEY
+VERI_ENC_KEY_IV
+CREATED_BY
+UPDATED_BY
+UPDATED_DATE
+CREATED_DATE
+STATUS
+
+
+573313B7ED4C7700E0637D86B10A6CD6	40	NB	"PID=SB0001&BRN={0}&AMT={1}&ACTNO=2167543602&RU=https://dev.epay.sbi/payments/v1/other-inb/callback/bom/retail&NAR=Payment Initiation&SCRIPID=RIL&CHECKSUM={2}&TDATETI
+ME={3}&CURRENCY=INR"	PID=SB0001&BRN={0}&AMT={1}&ACTNO=216754360&STATUS=S&TID={2}&MODE=P&NAR=Payment Initiation&ERRCODE=00&ERRMSG=TransactionSuccessful&TDATETIME={3}&CURRENCY=INR&CHECKSUM={4}	PID=SB0001&BRN={0}&AMT={1}&TID={2}&CHECKSUM={3}	PID=SB0001&BRN={0}&AMT={1}&TID={2}&CHECKSUM={3}	YES	PAYMENT		encrypt	decrypt		getCheckSumSHA512	SHA512	PID=SB0001&BRN={0}&AMT={1}	NULL	NULL	SBIEPAY@26031995	NULL	SBIEPAY@26031995	NULL	system	system	172333333333	172333333333	A	ok	https://lsb-uat.bankofmaharashtra.bank.in/PaymentGateway/pay	https://mahaapisuat.bankofmaharashtra.bank.in/v2/iexceed-merchantverify-enc	NA	PGh0bWw+Cjxib2R5IG9ubG9hZD1kb2N1bWVudC5mb3Jtc1swXS5zdWJtaXQoKT4KPGZvcm0gbWV0aG9kPSJ7TUVUSE9EfSIgYWN0aW9uPSJ7QUNUSU9OX1VSTH0iPgo8aW5wdXQgdHlwZT0iaGlkZGVuIiBuYW1lPSJNT0RFIiB2YWx1ZT0iUCI+CjxpbnB1dCB0eXBlPSJoaWRkZW4iIG5hbWU9Im1lcmNoYW50X2NvZGUiIHZhbHVlPSJTQjAwMDEiPgo8aW5wdXQgdHlwZT0iaGlkZGVuIiBuYW1lPSJlbmNkYXRhIiB2YWx1ZT0ie3ZEYXRhfSI+CjwvZm9ybT4KPC9ib2R5Pgo8L2h0bWw+	POST	processInitiate	BOMUtility	
+
+
+
+		
