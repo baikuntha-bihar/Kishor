@@ -1,4 +1,8 @@
-  private static Cipher c;
+
+@RequiredArgsConstructor
+@Component("ICICIRetailEncryptionDecryptionUtil")
+public class ICICIRetailEncryptionDecryptionUtil {
+private static Cipher c;
     private static String sAlgorithm;
     private static Key encryptDecryptKey;
     LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
