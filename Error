@@ -1,70 +1,97 @@
-web req:-
-PRN=Maharashtra State Electricity Distribution Company Limited0460951106955&ITC=0460951106955&AMT=1860.00&CRN=INR&RU=%22https://www.sbiepay.sbi/payagg/AggICICINetBankingGatewayServlet%22&CG=Y
+ICICI NB GATEWAY UPDATES - GTW_MAP_ID = 131
 
-PRN={0}&ITC={1}&AMT={2}&CRN="INR"&RU={3}&CG="Y"
+1) UPDATE WEB_REQUEST_FORMAT
+PRN={0}&ITC={1}&AMT={2}&CRN=INR&RU={3}&CG=Y
 
-web res:-
-PRN=Maharashtra State Electricity Distribution Company Limited0460951106955ITC=0460951106955AMT=1860.00CRN=INRPAID=YBID=1241769591
+IMPORTANT:
+{0} must be the FULL PRN:
+Maharashtra State Electricity Distribution Company Limited0460951106955
 
-PRN={0}&ITC={1}&AMT={2}&CRN="INR"&RU={3}&PAID="Y"&BID={4}
-
-dv req:-
-IWQRYTASKOBJNAME=bay_mc_login&BAY_BANKID=ICI&MD=V&PID=000000001281&PRN=Maharashtra State Electricity Distribution Company Limited0460951106955&ITC=0460951106955&AMT=1860.00&CRN=INR&BID=1241769591
-
-IWQRYTASKOBJNAME={0}&BAY_BANKID={1}&MD={2}&PID={3}&PRN={4}&ITC="ICICI BANK"&AMT={5}&CRU_CONSTRN="INR"&BID={6}
-
-dv res:-
+Do NOT keep this old style:
+PRN="Maharashtra State Electricity Distribution Company Limited"&ITC={0}&AMT={1}&CRN="INR"&RU={2}&CG="Y"
 
 
-iciciDvurlConn : Before Retry POST Response Code ::200 ,for 0460951106955
-In iciciDvurlConn response:<table BORDER="4" WIDTH="100%" CELLPADDING="0" CELLSPACING="0" BGCOLOR="#000000"><tr><td><FONT FACE="ARIAL,MONACO" SIZE=+1 COLOR="#00FF00">Your Payment is Successful</FONT>&nbsp;</td></tr></table><p><a href='null?PRN=MaharashtraStateElectricityDistributionCompanyLimited0460951106955&PID=000000001281&BID=1241769591&AMT=1860.00&CRN=INR&BankId=026&MD=V&PmtStatus=Successful&ITC=0460951106955'>Return to Shopping Site</a><p> ,for 0460951106955
-Double Verificaation xmlResult : <table BORDER="4" WIDTH="100%" CELLPADDING="0" CELLSPACING="0" BGCOLOR="#000000"><tr><td><FONT FACE="ARIAL,MONACO" SIZE=+1 COLOR="#00FF00">Your Payment is Successful</FONT>&nbsp;</td></tr></table><p><a href='null?PRN=MaharashtraStateElectricityDistributionCompanyLimited0460951106955&PID=000000001281&BID=1241769591&AMT=1860.00&CRN=INR&BankId=026&MD=V&PmtStatus=Successful&ITC=0460951106955'>Return to Shopping Site</a><p>
+2) UPDATE WEB_RESPONSE_FORMAT
+PRN={0}&ITC={1}&AMT={2}&CRN=INR&PAID=Y&BID={3}
+
+Do NOT include RU in response format unless bank actually returns RU.
+Actual response does not contain RU.
 
 
+3) UPDATE VERI_REQUEST_FORMAT
+IWQRYTASKOBJNAME={0}&BAY_BANKID={1}&MD={2}&PID={3}&PRN={4}&ITC={5}&AMT={6}&CRN=INR&BID={7}
+
+IMPORTANT:
+Use ITC={consumer/ITC number}, not ITC="ICICI BANK"
+Use CRN=INR, not CRU_CONSTRN="INR"
 
 
-2026-10-21 18:13:13.722 INFO | com.epay.otherinb.service.OtherInbPaymentService:72 | principal=  | scenario= | operation= | correlation= | methodName=processInitiation | otherInbChannelUnitMappingDto. OtherInbChannelUnitMappingDto(gtwMapId=131, payMode=NB, webRequestFormat=PRN="Maharashtra State Electricity Distribution Company Limited"&ITC={0}&AMT={1}&CRN="INR"&RU={2}&CG="Y", webResponseFormat=PRN="Maharashtra State Electricity Distribution Company Limited"&ITC={0}&AMT={1}&CRN="INR"&RU={2}&PAID="Y"&BID={3}, veriRequestFormat=IWQRYTASKOBJNAME={0}&BAY_BANKID={1}&MD={2}&PID={3}&PRN={4}&ITC="ICICI BANK"&AMT={5}&CRU_CONSTRN="INR"&BID={6}, veriResponseFormat=IWQRYTASKOBJNAME={0}&BAY_BANKID={1}&MD={2}&PID={3}&PRN={4}&ITC="ICICI BANK"&AMT={5}&CRU_CONSTRN="INR"&BID={6}, fromPostingFormat=YES, unitType=PAYMENT, unitName=null, encMethodName=iciciEncrypt, decMethodName=iciciDecrypt, channelReturnUrl=https://uat.sbiepay.sbi/payagg/AggICICINetBankingGatewayServlet, checksumMethodName=null, checksumType=null, checksumValue=null, commonEncKey=uxowYdKK3so2w6Ad, commonEncKeyIv=null, webEncKey=uxowYdKK3so2w6Ad, webEncKeyIv=null, veriEncKey=null, veriEncKeyIv=null, createdBy=system, updatedBy=system, updatedDate=172333333333, createdDate=172333333333, status=A, remarks=ok, bankUrl=https://cibnext.icicibank.com/corp/BANKAWAY, dvUrl=https://shopping.icicibank.com/corp/BANKAWAY, tokenUrl=null, formPostingTemplate=PGh0bWw+Cjxib2R5IG9ubG9hZD1kb2N1bWVudC5mb3Jtc1swXS5zdWJtaXQoKT4KPGZvcm0KbWV0aG9kPSIke01FVEhPRH0iCmFjdGlvbj0iJHtBQ1RJT05fVVJMfSI+CjxpbnB1dCB0eXBlPSJoaWRkZW4iIG5hbWU9IkJBWV9CQU5LSUQiIHZhbHVlPSIke0JBWV9CQU5LSUR9Ij4KPGlucHV0IHR5cGU9ImhpZGRlbiIgbmFtZT0iTUQiIHZhbHVlPSIke01EfSI+CjxpbnB1dCB0eXBlPSJoaWRkZW4iIG5hbWU9IlBJRCIgdmFsdWU9IiR7UElEfSI+CjxpbnB1dCB0eXBlPSJoaWRkZW4iIG5hbWU9IlNQSUQiIHZhbHVlPSIke1NQSUR9Ij4KPGlucHV0IHR5cGU9ImhpZGRlbiIgbmFtZT0iRVMiIHZhbHVlPSIke0VOQ19EQVRBfSI+CjwvZm9ybT4KPC9ib2R5Pgo8L2h0bWw+, formPostingMethod=POST, bankRoutingClass=ICICIRetailEncryptionDecryptionUtil, bankRoutingMethod=processInitiate)
-2026-10-21 18:13:13.734 INFO | com.epay.otherinb.util.encryptdecryptutil.ICICIRetailEncryptionDecryptionUtil:83 | principal=  | scenario= | operation= | correlation= | methodName=processInitiate | dateTimeString. 21/10/2026 18:13:13 for ICICI Bank 
-2026-10-21 18:13:13.735 INFO | com.epay.otherinb.util.encryptdecryptutil.ICICIRetailEncryptionDecryptionUtil:87 | principal=  | scenario= | operation= | correlation= | methodName=processInitiate | planeTextWebReqData. PRN="Maharashtra State Electricity Distribution Company Limited"&ITC=NB003174366193371259&AMT=MSEDCL&CRN="INR"&RU=6.18&CG="Y" for  ICICI Bank 
+4) UPDATE VERI_RESPONSE_FORMAT / DV RESPONSE HANDLING
+Do NOT use VERI_REQUEST_FORMAT as VERI_RESPONSE_FORMAT.
+
+DV response is HTML, example:
+Your Payment is Successful
+PmtStatus=Successful
+
+Success condition:
+Contains "Your Payment is Successful"
+OR
+Extract PmtStatus=Successful from returned URL.
+
+If DB requires a value, configure HTML/success parser, not key-value request format.
 
 
+5) JAVA processInitiation ARGUMENT ORDER
+{0} = full PRN = "Maharashtra State Electricity Distribution Company Limited" + ITC/consumer number
+{1} = ITC / consumer number
+{2} = AMT
+{3} = Return URL / RU
+
+Do not pass:
+{0} = NB...
+{1} = MSEDCL
+{2} = 6.18
 
 
+6) DV REQUEST ARGUMENT ORDER
+{0} = IWQRYTASKOBJNAME
+{1} = BAY_BANKID
+{2} = MD
+{3} = PID
+{4} = full PRN
+{5} = ITC / consumer number
+{6} = AMT
+{7} = BID
 
 
+7) REMOVE / CORRECT THESE OLD VALUES
+Remove: CRN="INR"
+Use:    CRN=INR
 
-ID
-GTW_MAP_ID
-PAY_MODE:NB 
-WEB_REQUEST_FORMAT
-WEB_RESPONSE_FORMAT
-VERI_REQUEST_FORMAT
-VERI_RESPONSE_FORMAT
-FROM_POSTING_FORMAT
-UNIT_TYPE
-UNIT_NAME
-ENC_METHOD_NAME
-DEC_METHOD_NAME
-CHANNEL_RETURN_URL
-CHECKSUM_METHOD_NAME
-CHECKSUM_TYPE
-CHECKSUM_VALUE
-COMMON_ENC_KEY
-COMMON_ENC_KEY_IV
-WEB_ENC_KEY
-WEB_ENC_KEYIV
-VERI_EN_CKEY
-VERI_ENC_KEY_IV
-CREATED_BY
-UPDATED_BY
-UPDATED_DATE
-CREATED_DATE
-STATUS
+Remove: CG="Y"
+Use:    CG=Y
+
+Remove: ITC="ICICI BANK"
+Use:    ITC={consumer/ITC number}
+
+Remove: CRU_CONSTRN="INR"
+Use:    CRN=INR
 
 
-573313B7ED4C7700E0637D86B10A6CD6	40	NB	"PID=SB0001&BRN={0}&AMT={1}&ACTNO=2167543602&RU=https://dev.epay.sbi/payments/v1/other-inb/callback/bom/retail&NAR=Payment Initiation&SCRIPID=RIL&CHECKSUM={2}&TDATETI
-ME={3}&CURRENCY=INR"	PID=SB0001&BRN={0}&AMT={1}&ACTNO=216754360&STATUS=S&TID={2}&MODE=P&NAR=Payment Initiation&ERRCODE=00&ERRMSG=TransactionSuccessful&TDATETIME={3}&CURRENCY=INR&CHECKSUM={4}	PID=SB0001&BRN={0}&AMT={1}&TID={2}&CHECKSUM={3}	PID=SB0001&BRN={0}&AMT={1}&TID={2}&CHECKSUM={3}	YES	PAYMENT		encrypt	decrypt		getCheckSumSHA512	SHA512	PID=SB0001&BRN={0}&AMT={1}	NULL	NULL	SBIEPAY@26031995	NULL	SBIEPAY@26031995	NULL	system	system	172333333333	172333333333	A	ok	https://lsb-uat.bankofmaharashtra.bank.in/PaymentGateway/pay	https://mahaapisuat.bankofmaharashtra.bank.in/v2/iexceed-merchantverify-enc	NA	PGh0bWw+Cjxib2R5IG9ubG9hZD1kb2N1bWVudC5mb3Jtc1swXS5zdWJtaXQoKT4KPGZvcm0gbWV0aG9kPSJ7TUVUSE9EfSIgYWN0aW9uPSJ7QUNUSU9OX1VSTH0iPgo8aW5wdXQgdHlwZT0iaGlkZGVuIiBuYW1lPSJNT0RFIiB2YWx1ZT0iUCI+CjxpbnB1dCB0eXBlPSJoaWRkZW4iIG5hbWU9Im1lcmNoYW50X2NvZGUiIHZhbHVlPSJTQjAwMDEiPgo8aW5wdXQgdHlwZT0iaGlkZGVuIiBuYW1lPSJlbmNkYXRhIiB2YWx1ZT0ie3ZEYXRhfSI+CjwvZm9ybT4KPC9ib2R5Pgo8L2h0bWw+	POST	processInitiate	BOMUtility	
+8) SQL UPDATE SKELETON
+UPDATE GTW_MAP
+SET
+  WEB_REQUEST_FORMAT  = 'PRN={0}&ITC={1}&AMT={2}&CRN=INR&RU={3}&CG=Y',
+  WEB_RESPONSE_FORMAT = 'PRN={0}&ITC={1}&AMT={2}&CRN=INR&PAID=Y&BID={3}',
+  VERI_REQUEST_FORMAT = 'IWQRYTASKOBJNAME={0}&BAY_BANKID={1}&MD={2}&PID={3}&PRN={4}&ITC={5}&AMT={6}&CRN=INR&BID={7}'
+WHERE GTW_MAP_ID = 131;
 
 
-
-		
+9) FINAL CHECK BEFORE CLOSING
+[ ] {0} in web request is full PRN including company name + consumer number
+[ ] ITC is consumer/ITC number, not "ICICI BANK"
+[ ] CRN=INR, CG=Y without quotes
+[ ] Web response parser matches PAID=Y and BID
+[ ] DV request uses correct BID from web response
+[ ] DV response parsed as HTML/link for PmtStatus=Successful
+[ ] Test one success case and one failure case
