@@ -1,262 +1,937 @@
-package com.epay.otherinb.util.encryptdecryptutil;
+================================================================
+ICICI NET BANKING INTEGRATION - COMPLETE REFERENCE
+Source: ICICI Bank Technical Integration Document
+================================================================
 
-import com.epay.otherinb.dao.OtherInbPaymentDao;
-import com.epay.otherinb.dto.ICICIDvResponseDto;
-import com.epay.otherinb.dto.ICICIResponseDto;
-import com.epay.otherinb.dto.OtherInbChannelUnitMappingDto;
-import com.epay.otherinb.dto.TransactionDto;
-import com.epay.otherinb.exceptions.OtherInbPaymentException;
-import com.epay.otherinb.model.request.PaymentRequest;
-import com.epay.otherinb.model.response.OtherInbPostingData;
-import com.epay.otherinb.model.response.PostingData;
-import com.epay.otherinb.util.OtherInbFormPostingUtil;
-import com.epay.otherinb.util.constants.ErrorConstants;
-import com.epay.otherinb.util.constants.OtherInbConstants;
-import com.sbi.epay.logging.utility.LoggerFactoryUtility;
-import com.sbi.epay.logging.utility.LoggerUtility;
-import org.apache.commons.lang3.StringUtils;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
+GLOBAL FACTS
+------------------------------------------------------------
+- Base Bank URL        : https://payments.icici.bank.in/sm/BANKAWAY
+- Method               : IWQRYTASKOBJNAME=bay_mc_login&BAY_BANKID=ICI
+- Protocol             : HTTPS (POST recommended, GET allowed)
+- Currency             : INR only (currently)
+- Encryption util      : com.infosys.bankaway.icici.util.EncryptDecryptUtil
+- Master key           : Shared by ICICI (per-merchant)
+- MD, PID, SPID        : NOT encrypted (sent plain)
+- Everything else      : bundled into ES (encrypted string)
+- ITC rule             : MUST be UPPERCASE, MUST be unique per txn
+- RU rule              : MUST start and end with %22 (URL-encoded quote)
+- CG=Y                 : BID returned in callback (allows verification)
+- CG=N                 : BID NOT returned (verification not possible)
 
-import javax.crypto.BadPaddingException;
-import javax.crypto.Cipher;
-import javax.crypto.IllegalBlockSizeException;
-import javax.crypto.NoSuchPaddingException;
-import javax.crypto.spec.SecretKeySpec;
-import java.io.IOException;
-import java.math.BigDecimal;
-import java.security.InvalidKeyException;
-import java.security.Key;
-import java.security.NoSuchAlgorithmException;
-import java.text.DecimalFormat;
-import java.text.MessageFormat;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
-import java.util.Arrays;
-import java.util.Base64;
-import java.util.Map;
-import java.util.Optional;
-import java.util.stream.Collectors;
 
-@Component("ICICIRetailEncryptionDecryptionUtil")
-public class ICICIRetailEncryptionDecryptionUtil {
+================================================================
+1. REQUEST PARAMETERS (merchant -> ICICI)
+================================================================
 
-    private static Cipher c;
-    private static String sAlgorithm;
-    private static Key encryptDecryptKey;
-    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
-    @Autowired
-    private OtherInbPaymentDao otherInbPaymentDao;
-    @Autowired
-    private OtherInbFormPostingUtil otherInbFormPostingUtil;
+Parameter | Encrypted | Required | Description
+----------|-----------|----------|------------------------------------------
+MD        | NO        | YES      | Mode: P = Payment, V = Verification
+PID       | NO        | YES      | Payee ID (12 digit, given by ICICI)
+SPID      | NO        | YES      | Sub-merchant Payee ID (12 digit)
+PRN       | YES (ES)  | YES      | Payment reference number (max 254, alnum)
+ITC       | YES (ES)  | YES      | Item/cart code (max 64, alnum, UPPERCASE, unique)
+AMT       | YES (ES)  | YES      | Amount with 2 decimals (max 18)
+CRN       | YES (ES)  | YES      | Currency code = INR
+RU        | YES (ES)  | YES      | Return URL (must start/end with %22)
+CG        | YES (ES)  | YES      | Y = confirm online, N = no confirmation
+BID       | YES (ES)  | NO       | Only in response (10 digit payment ID)
+ES        | YES       | YES      | Encrypted blob of the YES-encrypted params
 
-    // ------------------------------------------------------------------
-    // FIX #1 (runtime NPE):
-    //   Original had @RequiredArgsConstructor on the class + this explicit
-    //   (String) ctor. Lombok generated a no-arg ctor; Spring preferred it;
-    //   static encryptDecryptKey / c stayed null -> NPE on first encrypt.
-    //
-    //   Fix: removed @RequiredArgsConstructor, added @Autowired here, and
-    //   @Value falls back to the SAME original key so encryption output
-    //   is byte-for-byte unchanged.
-    //
-    //   NOTE: `new ICICIRetailEncryptionDecryptionUtil("uxowYdKK3so2w6Ad")`
-    //   inside encryptedPostedData() still works — @Autowired only
-    //   affects Spring's behaviour, not manual instantiation.
-    // ------------------------------------------------------------------
-    @Autowired
-    public ICICIRetailEncryptionDecryptionUtil(
-            @Value("${icici.master.key:uxowYdKK3so2w6Ad}") String sMasterKey)
-            throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException {
 
-        String sKey = "";
-        String sAlgorithm = "AES";
-        sKey = sMasterKey.trim();
-        if (sKey.length() != 16) {
-            throw new InvalidKeyException("Master Key should be of 16 Characters");
-        } else {
-            byte[] sKeyBytes = sKey.getBytes();
-            encryptDecryptKey = (Key) (new SecretKeySpec(sKeyBytes, sAlgorithm));
-            c = Cipher.getInstance(sAlgorithm);
-        }
-    }
+================================================================
+2. RESPONSE PARAMETERS (ICICI -> merchant, inside ES)
+================================================================
 
-    // WEB REQUEST INITIATION METHOD FOR ICICI BANK
-    public OtherInbPostingData processInitiate(PaymentRequest paymentWebRequest,
-                                               TransactionDto transactionDto,
-                                               OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto)
-            throws Exception {
+Parameter | Description
+----------|------------------------------------------------------
+PRN       | Payment reference number (echo of request)
+ITC       | Item code (echo of request)
+AMT       | Amount (echo of request)
+CRN       | Currency (INR)
+PAID      | Y = Success, N = Failure/Cancelled
+BID       | 10 digit payment ID (0 if cancelled or CG=N)
 
-        DateTimeFormatter dateTime = DateTimeFormatter.ofPattern(OtherInbConstants.TXN_DATETIME_FORMAT);
-        String txnDateTime = LocalDateTime.now().format(dateTime);
-        logger.info("dateTimeString. {} for ICICI Bank ", txnDateTime);
+Notes:
+- Response is delivered inside the ES parameter of the RU.
+- Decrypt ES with same master key.
+- Structure = key=value&key=value&... (URL-encoded).
+- PAID=Y and BID!=0  -> success
+- PAID=N or BID=0    -> failure/cancel
 
-        String planeTextWebReqData = createWebRequest(transactionDto, otherInbChannelUnitMappingDto, txnDateTime);
-        logger.info("planeTextWebReqData. {} for  ICICI Bank ", planeTextWebReqData);
 
-        // Kept as-is (still duplicated per your instruction — flagged for later cleanup)
-        otherInbPaymentDao.saveRequestLog(planeTextWebReqData, paymentWebRequest.getAtrn(),
-                OtherInbConstants.WEB_REQUEST_TYPE, OtherInbConstants.CREATED_BY_ICICI);
-        otherInbPaymentDao.saveRequestLog(planeTextWebReqData, paymentWebRequest.getAtrn(),
-                OtherInbConstants.WEB_REQUEST_TYPE, OtherInbConstants.CREATED_BY_ICICI);
+================================================================
+3. REQUEST URL (Payment Initiation)
+================================================================
 
-        return OtherInbPostingData.builder()
-                .atrn(transactionDto.getAtrnNum())
-                .merchIdVal(transactionDto.getMerchantId())
-                .encryptTrans(otherInbFormPostingUtil.getFormPostingData(
-                        otherInbFormPostingUtil.getForm_Dhanlaxmi(
-                                encryptedPostedData(planeTextWebReqData,
-                                        otherInbChannelUnitMappingDto, transactionDto).getData(),
-                                transactionDto, otherInbChannelUnitMappingDto),
-                        otherInbChannelUnitMappingDto, transactionDto))
-                .build();
-    }
+GET format (all values visible in URL - NOT recommended):
 
-    // WEB REQUEST CREATION METHOD
-    public String createWebRequest(TransactionDto transactionDto,
-                                   OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto,
-                                   String txnDateTime) {
-        return MessageFormat.format(
-                String.valueOf(otherInbChannelUnitMappingDto.getWebRequestFormat()),
-                transactionDto.getAtrnNum(), "MSEDCL", transactionDto.getDebitAmt(),
-                transactionDto.getCurrencyCode(),
-                otherInbChannelUnitMappingDto.getChannelReturnUrl(), "Y");
-    }
+https://payments.icici.bank.in/sm/BANKAWAY
+    ?IWQRYTASKOBJNAME=bay_mc_login
+    &BAY_BANKID=ICI
+    &MD=P
+    &PID=000000000212
+    &SPID=100000000004
+    &ES=<ENCRYPTED_STRING>
 
-    public PostingData encryptedPostedData(String planeTextWebReqData,
-                                           OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto,
-                                           TransactionDto transactionDto) throws Exception {
-        // Kept as-is — manual instance uses the same 16-char key.
-        String encWebReqData = new ICICIRetailEncryptionDecryptionUtil("uxowYdKK3so2w6Ad")
-                .iciciEncrypt(planeTextWebReqData);
-        return PostingData.builder().data(encWebReqData).build();
-    }
 
-    // ------------------------------------------------------------------
-    // FIX #2 + #4 (compile error + NPE guard):
-    //   sun.misc.BASE64Encoder -> java.util.Base64.getEncoder()
-    //   Output is identical: original strips \n/\r right after anyway.
-    // ------------------------------------------------------------------
-    public String iciciEncrypt(String stringToEncrypt)
-            throws InvalidKeyException, IllegalStateException,
-                   IllegalBlockSizeException, BadPaddingException {
+================================================================
+4. POSTING FORMAT (RECOMMENDED)
+================================================================
 
-        // ADDED: null guard (prevents NPE from caller)
-        if (stringToEncrypt == null) {
-            throw new IllegalArgumentException("stringToEncrypt must not be null");
-        }
+HTML form:
 
-        c.init(1, encryptDecryptKey);
-        String sEncString = Base64.getEncoder()
-                .encodeToString(c.doFinal(stringToEncrypt.getBytes()));
-        sEncString = sEncString.replaceAll("\n", "");
-        sEncString = sEncString.replaceAll("\r", "");
-        return sEncString;
-    }
+<FORM ACTION="https://payments.icici.bank.in/sm/BANKAWAY?IWQRYTASKOBJNAME=bay_mc_login&BAY_BANKID=ICI"
+      METHOD="post"
+      NAME="TESTFORM">
 
-    // ------------------------------------------------------------------
-    // FIX #3 + #4 (compile error + NPE guard):
-    //   sun.misc.BASE64Decoder -> java.util.Base64.getMimeDecoder()
-    //   getMimeDecoder() tolerates \n/\r exactly like the original
-    //   BASE64Decoder.decodeBuffer() did.
-    // ------------------------------------------------------------------
-    public String iciciDecrypt(String stringToDecrypt)
-            throws InvalidKeyException, IOException, IllegalStateException,
-                   IllegalBlockSizeException, BadPaddingException {
+    <INPUT TYPE="HIDDEN" NAME="SBMTTYPE" VALUE="POST" />
+    <INPUT TYPE="HIDDEN" NAME="MD"       VALUE="P" />
+    <INPUT TYPE="HIDDEN" NAME="PID"      VALUE="000000000212" />
+    <INPUT TYPE="HIDDEN" NAME="SPID"     VALUE="100000000004" />
+    <INPUT TYPE="HIDDEN" NAME="ES"       VALUE="<ENCRYPTED_STRING>" />
 
-        // ADDED: null guard
-        if (stringToDecrypt == null) {
-            throw new IllegalArgumentException("stringToDecrypt must not be null");
-        }
+    <INPUT TYPE="SUBMIT" NAME="SHOP" VALUE="Shop Now!" />
+</FORM>
 
-        c.init(2, encryptDecryptKey);
-        byte[] cleartext = Base64.getMimeDecoder()
-                .decode(this.replaceSpecialChars(stringToDecrypt));
-        byte[] ciphertext = c.doFinal(cleartext);
-        return this.bytes2String(ciphertext);
-    }
 
-    private String bytes2String(byte[] bytes) {
-        // UNCHANGED
-        StringBuffer stringBuffer = new StringBuffer();
-        for (int i = 0; i < bytes.length; ++i) {
-            stringBuffer.append((char) bytes[i]);
-        }
-        return stringBuffer.toString();
-    }
+================================================================
+5. ES STRING - PLAIN FORM (before encryption)
+================================================================
 
-    private String replaceSpecialChars(String str) {
-        // UNCHANGED
-        StringBuffer sb = new StringBuffer();
-        for (int i = 0; i < str.length(); ++i) {
-            if (str.charAt(i) == ' ') {
-                sb.append('+');
-            } else {
-                sb.append(str.charAt(i));
-            }
-        }
-        return sb.toString();
-    }
+Field order as documented (bind with & ):
 
-    // ==================================================================
-    // ============  BELOW MARKER — validation added  ===================
-    // ==================================================================
+PRN=<PRN>
+&ITC=<ITC>
+&AMT=<AMT>
+&CRN=INR
+&RU=%22<RETURN_URL>%22
+&CG=Y
 
-    // FIX #5 (NPE guard):
-    //   decResponse.split(...) throws NPE when decResponse is null.
-    //   Blank check added; existing parsing logic unchanged.
-    public Map<String, String> getDecryptedData(String decResponse) {
+Example:
+PRN=78945612396325871
+&ITC=1023814
+&AMT=1.00
+&CRN=INR
+&RU=%22https://commerce.test.com/commerce/returntotest.jsp?payopt=ICI&redeemgc=n&gcertno=%22
+&CG=Y
 
-        if (decResponse == null || decResponse.trim().isEmpty()) {
-            throw new OtherInbPaymentException(
-                    ErrorConstants.WEB_CHECKSUM_ERROR_CODE,
-                    ErrorConstants.WEB_CHECKSUM_MISMATCH_ERROR_MESSAGE);
-        }
 
-        return Optional.of(Arrays.stream(decResponse.split("\\|"))
-                        .map(kv -> kv.split(OtherInbConstants.PATTERN_EQUAL_TO_CONST))
-                        .filter(kvArray -> kvArray.length > 1)
-                        .collect(Collectors.toMap(
-                                kv -> kv[0],
-                                kv -> StringUtils.isBlank(kv[1])
-                                        ? OtherInbConstants.NA
-                                        : kv[1].trim())))
-                .orElseThrow(() -> new OtherInbPaymentException(
-                        ErrorConstants.WEB_CHECKSUM_ERROR_CODE,
-                        ErrorConstants.WEB_CHECKSUM_MISMATCH_ERROR_MESSAGE));
-    }
+================================================================
+6. CHANNEL RETURN URL (merchant-supplied "RU")
+================================================================
 
-    // UNCHANGED (stub — returns null per original)
-    public String getDvRespDecryptedData(String encryptedData) throws Exception {
-        return null;
-    }
+The RU must:
+- Be enclosed between %22 ... %22 (URL-encoded double quotes)
+- Contain at least the merchant's mandatory query param (e.g. payopt=ICI)
+- Be URL-encoded when placed inside ES
+- Be encrypted as part of ES (NOT passed plain)
 
-    // FIX #6 (NPE guard):
-    //   amount.setScale(...) throws NPE when amount is null.
-    //   Existing rounding logic unchanged.
-    public String formatedAmount(BigDecimal amount) {
-        if (amount == null) {
-            return OtherInbConstants.EMPTY;
-        }
-        BigDecimal convertedAmount = amount.setScale(2, BigDecimal.ROUND_UP);
-        DecimalFormat df = new DecimalFormat("0.00");
-        return df.format(convertedAmount);
-    }
+Example RU value (after URL-decoding the %22):
+"https://commerce.test.com/commerce/returntotest.jsp?payopt=ICI&redeemgc=n&gcertno="
 
-    // UNCHANGED (stub — returns empty DTO per original)
-    public ICICIDvResponseDto processICICIDoubleVerRequest(ICICIResponseDto iciciResponseDto) {
-        ICICIDvResponseDto dto = new ICICIDvResponseDto();
-        return dto;
-    }
+IMPORTANT: ICICI appends ES to this RU, so ensure the RU
+           contains a '?' or is prepared to accept an appended ES param.
 
-    // UNCHANGED (stub — returns dummy string per original)
-    public String getCallBackResponse(String mid, String orderid) {
-        return "plainDvRequestAndChecksum";
-    }
 
-    // UNCHANGED (stub — returns "ddf" per original)
-    public String processICICIDoubleVerRequest1(ICICIResponseDto MapWebResponseDto) {
-        return "ddf";
-    }
+================================================================
+7. RESPONSE URL (Callback - ICICI -> merchant)
+================================================================
+
+The bank calls the RU with ES appended.
+
+SUCCESS callback:
+https://commerce.test.com/commerce/returntotest.jsp
+    ?payopt=ICI
+    &redeemgc=n
+    &gcertno=
+    &ES=<ENCRYPTED_BLOB>
+
+CANCELLED / FAILURE callback:
+https://commerce.test.com/commerce/returntotest.jsp
+    ?payopt=ICI
+    &redeemgc=n
+    &gcertno=
+    &ES=<ENCRYPTED_BLOB>
+
+The distinguishing field is INSIDE the encrypted ES:
+- PAID=Y, BID=<10-digit>  -> success
+- PAID=N, BID=0           -> cancelled/failed
+
+
+================================================================
+8. ES DECRYPTION - RESPONSE SAMPLES (decrypted)
+================================================================
+
+Success:
+PRN=78945612396325871&ITC=1023814&AMT=1&CRN=INR&PAID=Y&BID=0125435380
+
+Cancelled:
+PRN=78945612396325871&ITC=1023814&AMT=1&CRN=INR&PAID=N&BID=0
+
+
+================================================================
+9. DOUBLE VERIFICATION (DV) - VERIFY URL
+================================================================
+
+Purpose:
+- 1st check : decrypt ES from callback URL (done in return handler)
+- 2nd check : call VERIFY URL using BID to confirm with bank
+              (this is what the code calls "Double Verification / DV")
+
+Method: GET
+MD must be V (Verification)
+NOT encrypted - all params sent plain in URL (per document)
+
+Format:
+
+https://payments.icici.bank.in/sm/BANKAWAY
+    ?IWQRYTASKOBJNAME=bay_mc_login
+    &BAY_BANKID=ICI
+    &MD=V
+    &PID=<PAYEE_ID>
+    &PRN=<PRN>
+    &ITC=<ITC>
+    &AMT=<AMOUNT>
+    &CRN=INR
+    &BID=<BID>
+
+
+DV / VERIFY URL PARAMETERS:
+
+Parameter | Required | Description
+----------|----------|--------------------------------------------
+IWQRY...  | YES      | bay_mc_login (constant)
+BAY_BANKID| YES      | ICI (constant)
+MD        | YES      | V (verification mode)
+PID       | YES      | Payee ID
+PRN       | YES      | Payment reference number
+ITC       | YES      | Item code (UPPERCASE)
+AMT       | YES      | Amount with decimals
+CRN       | YES      | INR
+BID       | YES      | Bank payment ID from callback (10 digits)
+
+
+DV / VERIFY URL RESPONSE:
+
+Per document: HTML page
+- Success   : "Your Payment is Successful"
+- Not found : "Payment Record Not Found Check the Parameters sent"
+
+NOTE:
+- The document describes a simple HTML response for the verify URL.
+- The current code (ICICIDvResponseDto) parses an encrypted JSON/key-value
+  response with fields: atrn, prn, bId, paId, amount.
+- This means your integration uses a NEWER encrypted-JSON DV API than
+  the one documented here. Confirm with ICICI which API version is active
+  in your environment (typically: newer encrypted DV endpoint).
+
+
+================================================================
+10. TRACKING URL (for TIME-OUT transactions - no BID available)
+================================================================
+
+Purpose:
+- When a payment times out, the merchant has no BID.
+- Tracking URL lets the merchant query by PRN + ITC + AMT + Pmt_Date
+  (without BID) to find the BID and status.
+
+Method: GET
+
+Format:
+
+http://payments.icici.bank.in/sm/BANKAWAY
+    ?IWQRYTASKOBJNAME=bay_mc_login
+    &BAY_BANKID=ICI
+    &MD=V
+    &PID=<PAYEE_ID>
+    &PRN=<PRN>
+    &ITC=<ITC>
+    &AMT=<AMOUNT>
+    &CRN=INR
+    &Pmt_Date=<YYYY-MM-DD>
+
+
+TRACKING URL PARAMETERS:
+
+Parameter | Required | Description
+----------|----------|--------------------------------------------
+MD        | YES      | V
+PID       | YES      | Payee ID
+PRN       | YES      | Payment reference number
+ITC       | YES      | Item code (UPPERCASE)
+AMT       | YES      | Amount
+CRN       | YES      | INR
+Pmt_Date  | YES      | Payment date (format: YYYY-MM-DD)
+
+Notes:
+- ITC must be unique (this is how the txn is located without BID)
+- Returns HTML page listing matching transactions with BID and status
+
+
+================================================================
+11. ENCRYPTION PROCESS - STEP BY STEP
+================================================================
+
+STEP 1 - Merchant builds ES plaintext:
+    PRN=<...>&ITC=<...>&AMT=<...>&CRN=INR&RU=%22<...>%22&CG=Y
+
+STEP 2 - Encrypt with EncryptDecryptUtil(masterKey):
+    encDecUtil = new com.infosys.bankaway.icici.util.EncryptDecryptUtil(masterKey);
+    String es = encDecUtil.encrypt(plaintextEs);
+
+STEP 3 - POST/GET to ICICI with MD, PID, SPID (plain) + ES (encrypted).
+
+STEP 4 - ICICI calls callback RU with ES=<encryptedResponse>.
+
+STEP 5 - Merchant decrypts ES:
+    String responseEs = encDecUtil.decrypt(request.getParameter("ES"));
+    -> returns "PRN=...&ITC=...&AMT=...&CRN=INR&PAID=Y&BID=..."
+
+STEP 6 - Parse responseEs. Check PAID==Y and BID!=0.
+
+STEP 7 - (Optional) Call VERIFY URL with BID for 2nd confirmation (DV).
+
+
+================================================================
+12. FIELD-BY-FIELD CHEAT SHEET
+================================================================
+
+REQUEST (POST/GET):
+    URL base : https://payments.icici.bank.in/sm/BANKAWAY
+    Always   : IWQRYTASKOBJNAME=bay_mc_login&BAY_BANKID=ICI
+    Plain    : MD=P, PID, SPID
+    Encrypted: ES = (PRN & ITC & AMT & CRN & RU & CG)
+
+RESPONSE (callback on RU):
+    Encrypted: ES = (PRN & ITC & AMT & CRN & PAID & BID)
+
+DV / VERIFY (GET, per document):
+    URL      : same base
+    Plain    : MD=V, PID, PRN, ITC, AMT, CRN, BID
+    Returns  : HTML confirmation (legacy) OR encrypted JSON (newer)
+
+TRACKING (GET, for timed-out txns):
+    URL      : same base
+    Plain    : MD=V, PID, PRN, ITC, AMT, CRN, Pmt_Date (YYYY-MM-DD)
+    Returns  : HTML listing of matching txns + BID
+
+
+================================================================
+13. MAPPING TO YOUR JAVA CODE
+================================================================
+
+Your code (ICICIRetailPaymentService) vs document:
+
+  Step in code                              | Document section
+  ------------------------------------------|-------------------------------
+  Decrypt ES from callback                  | 7. Response URL
+  Build ICICIResponseDto from decrypted ES  | 8. Decrypted ES samples
+  Validate paId == SUCCESS_CONST ("Y")      | 2. Response parameters (PAID)
+  call processICICIDoubleVerRequest1(...)   | 9. Double Verification (build DV URL)
+  call processingDoubleVerRequest(...)      | 9. Double Verification (call bank)
+  Decrypt DV response                       | 9. DV Response (encrypted variant)
+  Map to ICICIDvResponseDto                 | 9. DV Response (newer API)
+  Validate amount + bId match               | 9. DV validations
+  call processICICIDoubleVerRequest(...)    | 9. Second/final confirmation step
+
+
+FIELDS YOU USE           | DOC FIELD NAME       | NOTES
+-------------------------|----------------------|------------------------------
+ICICIResponseDto.prn     | PRN                  | match
+ICICIResponseDto.itc     | ITC                  | match (UPPERCASE)
+ICICIResponseDto.amount  | AMT                  | match
+ICICIResponseDto.crn     | CRN                  | match (INR)
+ICICIResponseDto.paId    | PAID                 | "Y"/"N"
+ICICIResponseDto.bId     | BID                  | 10 digits
+ICICIResponseDto.atrn    | (not in doc)         | newer field
+ICICIDvResponseDto.paId  | PAID                 | match
+ICICIDvResponseDto.bId   | BID                  | match
+ICICIDvResponseDto.amount| AMT                  | match
+ICICIDvResponseDto.prn   | PRN                  | match
+ICICIDvResponseDto.atrn  | (not in doc)         | newer field
+
+
+================================================================
+14. THINGS TO CONFIRM WITH ICICI BEFORE GO-LIVE
+================================================================
+
+[ ] Which DV API version is active?
+    - Legacy HTML verify URL  (per this doc)
+    - Newer encrypted JSON DV (matches your code)
+
+[ ] Master key (AES key + IV) - provided by ICICI.
+
+[ ] Endpoints for DV (may differ from payment URL):
+    - Payment init : /sm/BANKAWAY
+    - Verify       : /sm/BANKAWAY (per doc) OR dedicated URL
+    - Tracking     : /sm/BANKAWAY (per doc)
+
+[ ] Payee ID (PID) and Sub-merchant Payee ID (SPID) values.
+
+[ ] Confirm CG=Y for your flow (needed for BID & verification).
+
+[ ] Return URL whitelisting - RU base URL must be pre-registered
+    with ICICI (else callbacks rejected / no ES appended).
+
+[ ] Confirm timezone for Pmt_Date (used in tracking URL).
+
+[ ] Confirm whether DV response for your integration returns:
+    - "atrn" field (not in doc but present in your DTO)
+    - Encrypted JSON vs HTML
+
+
+================================================================
+15. QUICK REFERENCE - ALL URLs ON ONE PAGE
+================================================================
+
+PAYMENT INIT (POST form action):
+    https://payments.icici.bank.in/sm/BANKAWAY?IWQRYTASKOBJNAME=bay_mc_login&BAY_BANKID=ICI
+
+PAYMENT INIT (GET - not recommended):
+    https://payments.icici.bank.in/sm/BANKAWAY?IWQRYTASKOBJNAME=bay_mc_login&BAY_BANKID=ICI&MD=P&PID=<PID>&SPID=<SPID>&ES=<ENC>
+
+RETURN/CALLBACK (your RU - ICICI appends ES):
+    <YOUR_RU>?payopt=ICI&redeemgc=n&gcertno=&ES=<ENC>
+
+VERIFY / DOUBLE VERIFICATION (GET):
+    https://payments.icici.bank.in/sm/BANKAWAY?IWQRYTASKOBJNAME=bay_mc_login&BAY_BANKID=ICI&MD=V&PID=<PID>&PRN=<PRN>&ITC=<ITC>&AMT=<AMT>&CRN=INR&BID=<BID>
+
+TRACKING (GET - for timeout):
+    https://payments.icici.bank.in/sm/BANKAWAY?IWQRYTASKOBJNAME=bay_mc_login&BAY_BANKID=ICI&MD=V&PID=<PID>&PRN=<PRN>&ITC=<ITC>&AMT=<AMT>&CRN=INR&Pmt_Date=<YYYY-MM-DD>
+
+
+================================================================
+END OF REFERENCE
+================================================================
+
+================================================================
+ICICI PAYLOAD FORMATS - FOR DB STORAGE
+4 payloads to persist:
+  1. WEB REQUEST    (merchant -> ICICI, init)
+  2. WEB RESPONSE   (ICICI -> merchant, callback)
+  3. VERI REQUEST   (merchant -> ICICI, DV)
+  4. VERI RESPONSE  (ICICI -> merchant, DV)
+================================================================
+
+
+================================================================
+1. WEB REQUEST FORMAT
+   (merchant -> ICICI, payment initiation)
+================================================================
+
+WHERE IT COMES FROM
+------------------------------------------------------------
+Merchant builds it, encrypts it, posts it to ICICI.
+This is the "ES plaintext" BEFORE encryption.
+
+FIELD ORDER (mandatory - do not reorder)
+------------------------------------------------------------
+PRN & ITC & AMT & CRN & RU & CG
+
+DELIMITER
+------------------------------------------------------------
+&  (ampersand)
+key=value pairs
+
+FORMAT TEMPLATE
+------------------------------------------------------------
+PRN=<PRN>&ITC=<ITC>&AMT=<AMT>&CRN=INR&RU=%22<RETURN_URL>%22&CG=Y
+
+FIELD SPEC
+------------------------------------------------------------
+Key | Length | Type     | Description
+----|--------|----------|----------------------------------------
+PRN | 254    | Alnum    | Merchant payment reference (unique)
+ITC | 64     | Alnum    | Item/cart code (UPPERCASE, unique per txn)
+AMT | 18     | Number   | Amount, 2 decimals (e.g. 240.00)
+CRN | 3      | Char     | Currency - always INR
+RU  | -      | URL      | Return URL, wrapped in %22...%22
+CG  | 1      | Char     | Y = confirm online, N = no confirmation
+
+EXAMPLE (plaintext - store this decrypted version)
+------------------------------------------------------------
+PRN=78945612396325871
+&ITC=1023814
+&AMT=1.00
+&CRN=INR
+&RU=%22https://commerce.test.com/commerce/returntotest.jsp?payopt=ICI&redeemgc=n&gcertno=%22
+&CG=Y
+
+SINGLE LINE FORMAT
+------------------------------------------------------------
+PRN=78945612396325871&ITC=1023814&AMT=1.00&CRN=INR&RU=%22https://commerce.test.com/commerce/returntotest.jsp?payopt=ICI&redeemgc=n&gcertno=%22&CG=Y
+
+WHAT TO STORE IN DB
+------------------------------------------------------------
+Column               | Value
+---------------------|-------------------------------------------
+request_type         | 'WEB_REQUEST'
+request_encrypted    | (full ES encrypted string posted to ICICI)
+request_decrypted    | (the plaintext above)
+request_url          | https://payments.icici.bank.in/sm/BANKAWAY?...
+request_method       | 'POST'
+request_timestamp    | current epoch millis
+txn_ref_prn          | value of PRN
+txn_ref_itc          | value of ITC
+txn_amount           | value of AMT
+txn_currency         | value of CRN
+merchant_id          | value of PID
+sub_merchant_id      | value of SPID
+
+
+================================================================
+2. WEB RESPONSE FORMAT
+   (ICICI -> merchant, callback on RU)
+================================================================
+
+WHERE IT COMES FROM
+------------------------------------------------------------
+ICICI appends ES to merchant RU. Merchant decrypts ES.
+This is the ES plaintext AFTER decryption.
+
+FIELD ORDER (as returned by ICICI)
+------------------------------------------------------------
+PRN & ITC & AMT & CRN & PAID & BID
+  (+ ATRN in some newer API versions - optional)
+
+DELIMITER
+------------------------------------------------------------
+&  (ampersand)
+key=value pairs
+
+SUCCESS FORMAT
+------------------------------------------------------------
+PRN=<PRN>&ITC=<ITC>&AMT=<AMT>&CRN=INR&PAID=Y&BID=<10-digit>
+(+ &ATRN=<ATRN> if newer API)
+
+FAILURE / CANCEL FORMAT
+------------------------------------------------------------
+PRN=<PRN>&ITC=<ITC>&AMT=<AMT>&CRN=INR&PAID=N&BID=0
+
+FIELD SPEC
+------------------------------------------------------------
+Key  | Length | Type   | Description
+-----|--------|--------|--------------------------------------------
+PRN  | 254    | Alnum  | Echo of request PRN
+ITC  | 64     | Alnum  | Echo of request ITC
+AMT  | 18     | Number | Echo of request AMT
+CRN  | 3      | Char   | INR
+PAID | 1      | Char   | Y = success, N = failure/cancel
+BID  | 10     | Number | Bank Payment ID (0 if PAID=N)
+ATRN | -      | Alnum  | Optional - newer API txn ref
+
+EXAMPLE - SUCCESS (plaintext - store decrypted)
+------------------------------------------------------------
+PRN=78945612396325871&ITC=1023814&AMT=1&CRN=INR&PAID=Y&BID=0125435380
+(+ &ATRN=ABCD1234... if newer API)
+
+EXAMPLE - CANCELLED (plaintext - store decrypted)
+------------------------------------------------------------
+PRN=78945612396325871&ITC=1023814&AMT=1&CRN=INR&PAID=N&BID=0
+
+WHAT TO STORE IN DB
+------------------------------------------------------------
+Column               | Value
+---------------------|-------------------------------------------
+request_type         | 'WEB_RESPONSE'
+response_encrypted   | (the raw ES param value from callback URL)
+response_decrypted   | (the plaintext above)
+response_url         | (full callback URL with ES param)
+response_method      | 'GET'  (ICICI calls RU via browser GET)
+response_timestamp   | current epoch millis
+txn_ref_prn          | value of PRN
+txn_ref_itc          | value of ITC
+txn_amount           | value of AMT
+txn_currency         | value of CRN
+bank_paid_flag       | value of PAID  (Y / N)
+bank_payment_id      | value of BID
+bank_atrn            | value of ATRN (if present)
+
+
+================================================================
+3. VERI REQUEST FORMAT
+   (merchant -> ICICI, Double Verification / DV)
+================================================================
+
+WHERE IT COMES FROM
+------------------------------------------------------------
+Merchant builds it from the web response (BID, PRN, etc.)
+and sends it for DV (2nd confirmation with bank).
+
+The document describes a legacy GET verify URL, but your
+code uses an encrypted DV request. Both formats provided.
+
+----------------------------------------------------------------
+FORMAT A - LEGACY GET (per ICICI doc section 9)
+----------------------------------------------------------------
+
+METHOD : GET
+ENCRYPTED : NO (plain URL params)
+RESPONSE TYPE : HTML ("Your Payment is Successful" / "Not Found")
+
+URL TEMPLATE
+------------------------------------------------------------
+https://payments.icici.bank.in/sm/BANKAWAY
+    ?IWQRYTASKOBJNAME=bay_mc_login
+    &BAY_BANKID=ICI
+    &MD=V
+    &PID=<PID>
+    &PRN=<PRN>
+    &ITC=<ITC>
+    &AMT=<AMT>
+    &CRN=INR
+    &BID=<BID>
+
+EXAMPLE
+------------------------------------------------------------
+https://payments.icici.bank.in/sm/BANKAWAY?IWQRYTASKOBJNAME=bay_mc_login&BAY_BANKID=ICI&MD=V&PID=000000000105&PRN=2054g200&ITC=650123&AMT=240.00&CRN=INR&BID=9678543210
+
+FIELD SPEC
+------------------------------------------------------------
+Key       | Required | Description
+----------|----------|----------------------------------------------
+MD        | YES      | V (verification)
+PID       | YES      | Payee ID
+PRN       | YES      | Payment reference
+ITC       | YES      | Item code (UPPERCASE)
+AMT       | YES      | Amount
+CRN       | YES      | INR
+BID       | YES      | Bank Payment ID from callback
+
+----------------------------------------------------------------
+FORMAT B - NEWER ENCRYPTED DV (matches your code)
+----------------------------------------------------------------
+
+METHOD : POST (to ICICI DV endpoint)
+ENCRYPTED : YES (using same EncryptDecryptUtil)
+DELIMITER inside plaintext : per ICICI - pipe or & (confirm with bank)
+
+PLAINTEXT TEMPLATE (BEFORE encryption)
+------------------------------------------------------------
+PRN=<PRN>&ITC=<ITC>&AMT=<AMT>&CRN=INR&BID=<BID>&ATRN=<ATRN>
+(+ any other mandated fields)
+
+BUILT BY METHOD
+------------------------------------------------------------
+iciciRetailEncryptionDecryptionUtil.processICICIDoubleVerRequest1(dto)
+
+You need to log the PLAINTEXT returned by this method
+before it is encrypted and sent.
+
+WHAT TO STORE IN DB
+------------------------------------------------------------
+Column                | Value
+----------------------|-------------------------------------------
+request_type          | 'VERI_REQUEST'
+request_encrypted     | (the encrypted ES/blob sent to bank DV URL)
+request_decrypted     | (plaintext built by processICICIDoubleVerRequest1)
+request_url           | (DV endpoint URL)
+request_method        | 'GET' (legacy) or 'POST' (newer)
+request_timestamp     | current epoch millis
+txn_ref_prn           | value of PRN
+txn_ref_itc           | value of ITC
+txn_amount            | value of AMT
+txn_currency          | value of CRN
+bank_payment_id       | value of BID
+bank_atrn             | value of ATRN
+
+
+================================================================
+4. VERI RESPONSE FORMAT
+   (ICICI -> merchant, DV response)
+================================================================
+
+WHERE IT COMES FROM
+------------------------------------------------------------
+ICICI responds to the DV request. Format differs by API version.
+
+----------------------------------------------------------------
+FORMAT A - LEGACY HTML (per document)
+----------------------------------------------------------------
+
+CONTENT TYPE : HTML
+ENCRYPTED : NO
+PARSE : substring match
+
+SUCCESS BODY
+------------------------------------------------------------
+Your Payment is Successful
+
+FAILURE BODY
+------------------------------------------------------------
+Payment Record Not Found Check the Parameters sent
+
+----------------------------------------------------------------
+FORMAT B - NEWER ENCRYPTED JSON (matches your code)
+----------------------------------------------------------------
+
+CONTENT TYPE : Encrypted string (decrypt first)
+ENCRYPTED : YES
+AFTER DECRYPTION : JSON (or URL-decoded JSON)
+
+DECRYPTED SAMPLE (JSON)
+------------------------------------------------------------
+{
+  "atrn":   "ABCD1234567890",
+  "prn":    "78945612396325871",
+  "bId":    "0125435380",
+  "paId":   "0",
+  "amount": 1.00
 }
+
+FIELD MAPPING
+------------------------------------------------------------
+JSON key | Type    | Maps to (your DTO)          | Meaning
+---------|---------|-----------------------------|----------------------------
+atrn     | String  | ICICIDvResponseDto.atrn     | ICICI txn ref
+prn      | String  | ICICIDvResponseDto.prn      | Payment reference (echo)
+bId      | String  | ICICIDvResponseDto.bId      | Bank Payment ID
+paId     | String  | ICICIDvResponseDto.paId     | "0" = success, else fail
+amount   | Decimal | ICICIDvResponseDto.amount   | Amount
+
+SUCCESS INDICATOR
+------------------------------------------------------------
+paId = "0"    -> SUCCESS  (matches OtherInbConstants.ICICI_STATUS_SUCCESS_CONST)
+
+Note: paId semantics differ between web response and DV response:
+  Web callback : PAID = "Y" for success, "N" for failure
+  DV response  : paId = "0" for success, anything else = failure
+
+WHAT TO STORE IN DB
+------------------------------------------------------------
+Column                | Value
+----------------------|-------------------------------------------
+request_type          | 'VERI_RESPONSE'
+response_encrypted    | (raw encrypted blob from bank DV response)
+response_decrypted    | (decrypted JSON - full string)
+response_url          | (DV endpoint URL hit)
+response_method       | 'GET' or 'POST'
+response_timestamp    | current epoch millis
+txn_ref_prn           | value of prn
+txn_amount            | value of amount
+bank_payment_id       | value of bId
+bank_atrn             | value of atrn
+bank_paid_flag        | value of paId
+dv_status             | SUCCESS if paId == "0" else FAILED
+
+
+================================================================
+5. SUGGESTED DB SCHEMA
+================================================================
+
+Table name: icici_payment_payload_log
+
+CREATE TABLE icici_payment_payload_log (
+    id                   BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    -- Correlation
+    txn_ref_prn          VARCHAR(254) NOT NULL,   -- ICICI PRN
+    txn_ref_itc          VARCHAR(64),
+    merchant_id          VARCHAR(32),             -- PID
+    sub_merchant_id      VARCHAR(32),             -- SPID
+
+    -- Request/Response type
+    request_type         VARCHAR(32) NOT NULL,    -- WEB_REQUEST / WEB_RESPONSE /
+                                                  -- VERI_REQUEST / VERI_RESPONSE
+    request_method       VARCHAR(8),              -- GET / POST
+    request_url          TEXT,
+
+    -- Payloads
+    request_encrypted    TEXT,
+    request_decrypted    TEXT,
+    response_encrypted   TEXT,
+    response_decrypted   TEXT,
+
+    -- Parsed fields (for quick queries / dashboard)
+    txn_amount           DECIMAL(18,2),
+    txn_currency         VARCHAR(3),
+    bank_payment_id      VARCHAR(16),             -- BID / bId
+    bank_atrn            VARCHAR(64),             -- ATRN
+    bank_paid_flag       VARCHAR(8),              -- Y/N/0/etc.
+    dv_status            VARCHAR(16),             -- SUCCESS / FAILED / NA
+
+    -- Audit
+    created_date         BIGINT,                  -- epoch millis
+    created_by           VARCHAR(64),
+    remarks              VARCHAR(512),
+
+    INDEX idx_prn        (txn_ref_prn),
+    INDEX idx_itc        (txn_ref_itc),
+    INDEX idx_bid        (bank_payment_id),
+    INDEX idx_atrn       (bank_atrn),
+    INDEX idx_created    (created_date)
+);
+
+
+================================================================
+6. INSERT FLOW - WHERE TO LOG EACH PAYLOAD
+================================================================
+
+Point 1: WEB_REQUEST
+------------------------------------------------------------
+In merchant's payment-initiation code (before sending to ICICI):
+  - Build ES plaintext
+  - Insert row: request_type='WEB_REQUEST',
+                request_decrypted=<plaintext>,
+                request_encrypted=<es after encrypt()>,
+                request_url=<ICICI URL>, request_method='POST',
+                txn_ref_prn=<PRN>, txn_ref_itc=<ITC>,
+                txn_amount=<AMT>, txn_currency=<CRN>,
+                merchant_id=<PID>, sub_merchant_id=<SPID>,
+                created_date=System.currentTimeMillis()
+
+Point 2: WEB_RESPONSE
+------------------------------------------------------------
+In ICICIRetailPaymentService.processICICICallBack():
+  RIGHT AFTER decryption, BEFORE building DTO
+  (line: "logger.info(...decryptedWebResponse)")
+
+  Insert row: request_type='WEB_RESPONSE',
+              response_encrypted=<raw ES from request param>,
+              response_decrypted=<decryptedWebResponse>,
+              response_url=<full callback URL>,
+              response_method='GET',
+              txn_ref_prn=<parsed PRN>,
+              bank_payment_id=<parsed BID>,
+              bank_paid_flag=<parsed PAID>,
+              created_date=System.currentTimeMillis()
+
+Point 3: VERI_REQUEST
+------------------------------------------------------------
+In ICICIRetailPaymentService.iciciDvinitiationProcess():
+  RIGHT AFTER building DV request, BEFORE webClient call
+  (line: "String dvRequestString = ...processICICIDoubleVerRequest1(...)")
+
+  Insert row: request_type='VERI_REQUEST',
+              request_decrypted=<dvRequestString>,
+              request_url=<DV endpoint>, request_method='POST',
+              txn_ref_prn=<PRN>, bank_payment_id=<BID>,
+              created_date=System.currentTimeMillis()
+
+Point 4: VERI_RESPONSE
+------------------------------------------------------------
+In ICICIRetailPaymentService.iciciDvinitiationProcess():
+  RIGHT AFTER decrypting DV response, BEFORE parsing DTO
+  (line: "URLDecoder.decode(...decryptedDVResponse...)")
+
+  Insert row: request_type='VERI_RESPONSE',
+              response_encrypted=<raw DV response>,
+              response_decrypted=<decryptedDVResponse>,
+              txn_ref_prn=<PRN>,
+              bank_payment_id=<parsed bId>,
+              bank_atrn=<parsed atrn>,
+              bank_paid_flag=<parsed paId>,
+              dv_status=<SUCCESS if paId=0 else FAILED>,
+              created_date=System.currentTimeMillis()
+
+
+================================================================
+7. RETENTION & MASKING GUIDELINES
+================================================================
+
+SENSITIVE FIELDS
+------------------------------------------------------------
+- request_encrypted / response_encrypted
+  -> Store as-is (encrypted = already safe), but consider
+     column-level encryption at DB level.
+
+- request_decrypted / response_decrypted
+  -> Contains PII (amount, reference). Mask or restrict
+     to audit role only.
+
+- bank_payment_id (BID), bank_atrn
+  -> Not PII by themselves but link to customer payment.
+     Restrict to ops/audit roles.
+
+RETENTION
+------------------------------------------------------------
+Minimum : 90 days (typical payment reconciliation window)
+Recommended : 7 years (regulatory / audit)
+Consider : Archive to cold storage after 1 year
+
+ACCESS
+------------------------------------------------------------
+- Application role : INSERT + SELECT on PRN/BID for status lookup
+- Ops role         : full SELECT
+- Audit role       : full SELECT (read-only)
+- Developer role   : NO access to *_decrypted in PROD
+
+
+================================================================
+8. SAMPLE INSERT ROWS (for testing)
+================================================================
+
+--- WEB_REQUEST ---
+request_type        : WEB_REQUEST
+request_decrypted   : PRN=78945612396325871&ITC=1023814&AMT=1.00&CRN=INR&RU=%22https://commerce.test.com/commerce/returntotest.jsp?payopt=ICI&redeemgc=n&gcertno=%22&CG=Y
+request_encrypted   : RPSp/KFWxzxTgMOas9+Gsnio85dBDwGmNtbV4+FD...
+request_url         : https://payments.icici.bank.in/sm/BANKAWAY?IWQRYTASKOBJNAME=bay_mc_login&BAY_BANKID=ICI
+request_method      : POST
+txn_ref_prn         : 78945612396325871
+txn_ref_itc         : 1023814
+txn_amount          : 1.00
+txn_currency        : INR
+merchant_id         : 000000000212
+sub_merchant_id     : 100000000004
+
+--- WEB_RESPONSE (success) ---
+request_type        : WEB_RESPONSE
+response_decrypted  : PRN=78945612396325871&ITC=1023814&AMT=1&CRN=INR&PAID=Y&BID=0125435380
+response_encrypted  : <raw ES from callback>
+response_url        : https://commerce.test.com/commerce/returntotest.jsp?payopt=ICI&redeemgc=n&gcertno=&ES=...
+response_method     : GET
+txn_ref_prn         : 78945612396325871
+txn_amount          : 1.00
+txn_currency        : INR
+bank_payment_id     : 0125435380
+bank_paid_flag      : Y
+
+--- VERI_REQUEST ---
+request_type        : VERI_REQUEST
+request_decrypted   : PRN=78945612396325871&ITC=1023814&AMT=1&BID=0125435380&ATRN=ABCD1234...
+request_encrypted   : <encrypted DV request>
+request_url         : https://payments.icici.bank.in/sm/BANKAWAY?MD=V&...
+request_method      : POST
+txn_ref_prn         : 78945612396325871
+bank_payment_id     : 0125435380
+
+--- VERI_RESPONSE (success) ---
+request_type        : VERI_RESPONSE
+response_decrypted  : {"atrn":"ABCD1234","prn":"78945612396325871","bId":"0125435380","paId":"0","amount":1.00}
+response_encrypted  : <encrypted DV response>
+txn_ref_prn         : 78945612396325871
+bank_payment_id     : 0125435380
+bank_atrn           : ABCD1234
+bank_paid_flag      : 0
+dv_status           : SUCCESS
+
+
+================================================================
+9. QUICK REFERENCE - FORMAT SUMMARY
+================================================================
+
+PAYLOAD           | DELIMITER | ENCRYPTED | SAMPLE KEYS
+------------------|-----------|-----------|---------------------------
+WEB_REQUEST       | &         | YES (ES)  | PRN,ITC,AMT,CRN,RU,CG
+WEB_RESPONSE      | &         | YES (ES)  | PRN,ITC,AMT,CRN,PAID,BID[,ATRN]
+VERI_REQUEST      | &         | YES       | PRN,ITC,AMT,CRN,BID[,ATRN]
+VERI_RESPONSE     | JSON      | YES       | atrn,prn,bId,paId,amount
+
+SUCCESS INDICATOR
+------------------
+WEB_RESPONSE : PAID = "Y"
+VERI_RESPONSE: paId = "0"
+
+DELIMITER NOTES
+------------------
+- Web payloads : & (ampersand) key=value pairs
+- Veri response: JSON object (after decryption)
+- If ICICI changes format, delimiter may become | or ^
+  -> verify with bank before first production run
+
+
+================================================================
+END OF DB PAYLOAD REFERENCE
+================================================================
+
+
