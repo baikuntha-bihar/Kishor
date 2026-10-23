@@ -1,0 +1,2501 @@
+============================================================
+FILE 1: OtherINBPaymentCallBackController.java
+============================================================
+
+
+@RestController
+@RequiredArgsConstructor
+@Validated
+@Tag(name = OtherInbConstants.OTHER_INB_INITIATION_TAG_VALUE)
+@RequestMapping("/other-inb")
+public class OtherINBPaymentCallBackController {
+
+    @SneakyThrows
+    @PostMapping("/callback/icici/retail")
+    @Operation(summary = "ICICI Other INB Web Response and Double Verification API", description = "This API is used for Capture Web Response and Double Verification call to Bank.")
+    public PaymentFinalResponse iciciCallBackWebRequest(@RequestParam(OtherInbConstants.ENC_DATA_KEY) String webResponse) throws Exception {
+        logger.info("Other INB icici call back controller start {} ", webResponse);
+        return iciciRetailPaymentService.processICICICallBack(webResponse);
+
+}
+
+============================================================
+FILE 1: ICICIRetailPaymentService.java
+============================================================
+
+package com.epay.otherinb.service;
+
+import com.epay.otherinb.config.OtherInbConfigDetails;
+import com.epay.otherinb.dao.OrderDao;
+import com.epay.otherinb.dao.TransactionDao;
+import com.epay.otherinb.dto.ICICIDvResponseDto;
+import com.epay.otherinb.dto.ICICIResponseDto;
+import com.epay.otherinb.dto.TransactionDto;
+import com.epay.otherinb.entity.Order;
+import com.epay.otherinb.exceptions.OtherInbPaymentException;
+import com.epay.otherinb.externalservice.ICICIPaymentWebClientService;
+import com.epay.otherinb.model.response.FinalResponseStatus;
+import com.epay.otherinb.model.response.PaymentFinalResponse;
+import com.epay.otherinb.util.constants.ErrorConstants;
+import com.epay.otherinb.util.constants.OtherInbConstants;
+import com.epay.otherinb.util.encryptdecryptutil.ICICIRetailEncryptionDecryptionUtil;
+import com.epay.otherinb.util.enums.PaymentStatus;
+import com.epay.otherinb.validator.OtherInbPaymentValidator;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+import org.springframework.web.servlet.view.RedirectView;
+
+import javax.crypto.BadPaddingException;
+import javax.crypto.IllegalBlockSizeException;
+import javax.crypto.NoSuchPaddingException;
+import java.io.IOException;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.security.InvalidAlgorithmParameterException;
+import java.security.InvalidKeyException;
+import java.security.NoSuchAlgorithmException;
+import java.util.Base64;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+
+@Service
+@RequiredArgsConstructor
+public class ICICIRetailPaymentService {
+
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+
+    private final OtherInbPaymentValidator otherInbpaymentValidator;
+    private final ICICIPaymentWebClientService iCICIPaymentWebClientService;
+    private final ICICIRetailEncryptionDecryptionUtil iciciRetailEncryptionDecryptionUtil;
+    private final TransactionDao transactionDao;
+    private final OtherInbConfigDetails otherInbConfigDetails;
+    private final OrderDao orderDao;
+    private final PaymentCallbackForwardService paymentCallbackForwardService;
+
+    public RedirectView processICICIWebResponsePayload(String webResponse) throws InvalidAlgorithmParameterException, IllegalBlockSizeException, NoSuchPaddingException, BadPaddingException, NoSuchAlgorithmException, InvalidKeyException, IOException {
+
+        PaymentFinalResponse paymentFinalResponse = processICICICallBack(webResponse);
+        logger.info("Payment ICICI response to transaction service paymentFinalResponse {} ", paymentFinalResponse);
+
+        String txnStatus = Optional.ofNullable(paymentFinalResponse.getTransactionStatus()).map(String::toUpperCase).orElse(OtherInbConstants.EMPTY);
+
+        TransactionDto transactionDto = transactionDao.getValidPaymentAckReq(paymentFinalResponse.getAtrn(), OtherInbConstants.FAILURE_CONST.equalsIgnoreCase(txnStatus) ? OtherInbConstants.FAILED : txnStatus);
+
+        RedirectView redirectView = new RedirectView();
+        redirectView.setUrl(otherInbConfigDetails.getMerchantResponseView().concat(OtherInbConstants.MERCHANT_FINAL_RESPONSE).concat(Base64.getEncoder().encodeToString(paymentCallbackForwardService.processCallbackResponse(paymentFinalResponse, transactionDto, orderDao.getOrderDetails(transactionDto)).getBytes(StandardCharsets.UTF_8))));
+        return redirectView;
+    }
+
+    public PaymentFinalResponse processICICICallBack(String webResponse) throws InvalidAlgorithmParameterException, IllegalBlockSizeException, NoSuchPaddingException, BadPaddingException, NoSuchAlgorithmException, InvalidKeyException, IOException {
+
+        // 2.1 Decrypt web response
+        String decryptedWebResponse = Optional.ofNullable(iciciRetailEncryptionDecryptionUtil.iciciDecrypt(webResponse.replaceAll(OtherInbConstants.NEW_LINE_REGEX, OtherInbConstants.PATTERN_EMPTY).replace(OtherInbConstants.PATTERN_SPACE, OtherInbConstants.PATTERN_EMPTY))).filter(x -> !x.isEmpty()).orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.ICICI_WEB_RESPONSE_ERROR_CODE, ErrorConstants.ICICI_WEB_RESPONSE_ERROR_MESSAGE));
+        logger.info("Payment Callback Decrypted Web Response {} ", decryptedWebResponse);
+
+        // 2.2 Validate web response
+        Map<String, String> decryptedMap = iciciRetailEncryptionDecryptionUtil.getDecryptedData(decryptedWebResponse);
+        otherInbpaymentValidator.validateICICIWebResponse(decryptedMap);
+
+        ICICIResponseDto iciciMapWebResponseDto = Optional.ofNullable(new ObjectMapper().convertValue(decryptedMap, ICICIResponseDto.class)).orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.ICICI_WEB_RESPONSE_ERROR_CODE, ErrorConstants.ICICI_WEB_RESPONSE_ERROR_MESSAGE));
+        logger.info("Payment Callback Decrypted Web Response iciciMapWebResponseDto {} ", iciciMapWebResponseDto);
+
+        if (!OtherInbConstants.ICICI_STATUS_SUCCESS_CONST.equalsIgnoreCase(iciciMapWebResponseDto.getPaId())) {
+            return getRedirectObject(iciciMapWebResponseDto);
+        }
+
+        ICICIResponseDto callBackResponse = mapCallBackResponse(iciciMapWebResponseDto);
+        otherInbpaymentValidator.validateICICIcallBack(callBackResponse);
+
+        iciciDvinitiationProcess(callBackResponse);
+        return getRedirectObject(iciciMapWebResponseDto);
+    }
+
+    public PaymentFinalResponse iciciDvinitiationProcess(ICICIResponseDto iciciResponseDto) throws InvalidAlgorithmParameterException, IllegalBlockSizeException, NoSuchPaddingException, BadPaddingException, NoSuchAlgorithmException, InvalidKeyException, IOException {
+
+        transactionDao.getValidPaymentAckReq(iciciResponseDto.getPrn(), PaymentStatus.BOOKED.toString(), OtherInbConstants.ICICI_CONST);
+
+        switch (Optional.ofNullable(iciciResponseDto.getPaId()).orElse(OtherInbConstants.EMPTY)) {
+
+            case OtherInbConstants.ICICI_STATUS_SUCCESS_CONST -> {
+                String dvRequestString = iciciRetailEncryptionDecryptionUtil.processICICIDoubleVerRequest1(iciciResponseDto);
+                logger.info("Payment Callback Plain DV Request for ICICI {} ", dvRequestString);
+                String iciciResponse = iCICIPaymentWebClientService.processingDoubleVerRequest(dvRequestString);
+                logger.info("Payment Callback Plain DV Response for ICICI {} ", iciciResponse);
+                String decryptedDVResponse = URLDecoder.decode(iciciRetailEncryptionDecryptionUtil.iciciDecrypt(iciciResponse.trim().replaceAll(OtherInbConstants.NEW_LINE_REGEX, OtherInbConstants.PATTERN_EMPTY).replace(OtherInbConstants.PATTERN_SPACE, OtherInbConstants.PATTERN_EMPTY)), StandardCharsets.UTF_8);
+                logger.info("Payment Callback Decrypted and Decode Double Verification Response {} ", decryptedDVResponse);
+                ICICIDvResponseDto icicimapDVResponseDto = convertDvResponsetoDto(decryptedDVResponse);
+                if (!icicimapDVResponseDto.getPrn().equalsIgnoreCase(OtherInbConstants.ICICI_STATUS_SUCCESS_CONST)) {
+                    ICICIResponseDto MapWebResponseDto = ICICIResponseDto.builder().paId(icicimapDVResponseDto.getPaId()).paId(icicimapDVResponseDto.getPaId()).atrn(icicimapDVResponseDto.getPrn()).build();
+                    return getRedirectObject(MapWebResponseDto);
+                }
+                logger.info("Payment Callback ICICImapDVResponseDto@@@@@@ for ICICI {} ", icicimapDVResponseDto);
+                validateCallBackResponse(iciciResponseDto, icicimapDVResponseDto); // Check Method...
+                ICICIDvResponseDto iciciDvResponseDto = iciciRetailEncryptionDecryptionUtil.processICICIDoubleVerRequest(iciciResponseDto);
+                logger.info("Payment Callback ICICIDvResponseDto for ICICI {} ", iciciDvResponseDto);
+            }
+            default -> {
+                return getRedirectObject(iciciResponseDto);
+            }
+        }
+        return getRedirectObject(iciciResponseDto);
+    }
+
+    public PaymentFinalResponse getRedirectObject(ICICIResponseDto iciciResponseDto) {
+
+        String paId = Optional.ofNullable(iciciResponseDto.getPaId()).orElse(OtherInbConstants.EMPTY);
+        String resolvedStatus = paId.equalsIgnoreCase(OtherInbConstants.ZERO) ? OtherInbConstants.SUCCESS : OtherInbConstants.FAILED;
+
+        logger.info("Payment Callback ICICIDvResponseDto for ICICI atrn : {} status : {} paymodecode : {} ", iciciResponseDto.getPrn(), resolvedStatus, OtherInbConstants.ICICI_CONST);
+
+        TransactionDto transactionDto = transactionDao.getTransactionDetails(iciciResponseDto.getPrn());
+        logger.info("Payment Callback ICICIDvResponseDto for ICICI {} ", transactionDto);
+
+        Order order = transactionDto != null ? orderDao.getOrderDetails(transactionDto) : null;
+
+        FinalResponseStatus finalResponseStatus = getStatus(transactionDto, order, resolvedStatus, paId.isEmpty() ? OtherInbConstants.EMPTY : paId);
+
+        return PaymentFinalResponse.builder().mId(Optional.ofNullable(transactionDto).map(TransactionDto::getMerchantId).orElse(OtherInbConstants.EMPTY)).merchantOrderNumber(Optional.ofNullable(transactionDto).map(TransactionDto::getOrderRefNumber).orElse(OtherInbConstants.EMPTY)).sbiOrderId(Optional.ofNullable(transactionDto).map(TransactionDto::getSbiOrderRefNumber).orElse(OtherInbConstants.EMPTY)).orderAmount(Optional.ofNullable(transactionDto).map(TransactionDto::getOrderAmount).map(String::valueOf).orElse(OtherInbConstants.EMPTY)).totalAmount(Optional.ofNullable(transactionDto).map(TransactionDto::getDebitAmt).map(String::valueOf).orElse(OtherInbConstants.EMPTY)).atrn(Optional.ofNullable(transactionDto).map(TransactionDto::getAtrnNum).orElse(OtherInbConstants.EMPTY)).transactionStatus(finalResponseStatus.getStatus()).reason(finalResponseStatus.getResponseReason()).CIN(Optional.ofNullable(transactionDto).map(TransactionDto::getCin).orElse(OtherInbConstants.EMPTY)).otherDetails(Optional.ofNullable(order).map(Order::getOtherDetails).orElse(OtherInbConstants.EMPTY)).bankName(Optional.ofNullable(transactionDto).map(TransactionDto::getChannelBank).orElse(OtherInbConstants.EMPTY)).bankTxnNumber(paId).bankCode(Optional.ofNullable(transactionDto).map(TransactionDto::getPayMode).orElse(OtherInbConstants.EMPTY)).customerId(Optional.ofNullable(order).map(Order::getCustomerId).orElse(OtherInbConstants.EMPTY)).orderRetryCount(Optional.ofNullable(order).map(Order::getOrderRetryCount).map(String::valueOf).orElse(OtherInbConstants.EMPTY)).build();
+    }
+
+    public FinalResponseStatus getStatus(TransactionDto transactionDto, Order order, String channelStatus, String failureReason) {
+        if (transactionDto == null || order == null || !Objects.equals(transactionDto.getOrderAmount(), order.getOrderAmount())) {
+            return FinalResponseStatus.builder().status(OtherInbConstants.FAILED).responseReason(OtherInbConstants.FAILED_FOR_AMOUNT_NOT_MATCHED).build();
+        }
+        String safeReason = Optional.ofNullable(failureReason).orElse(OtherInbConstants.EMPTY).replaceAll(OtherInbConstants.SPECIAL_CHAR_REGEX, OtherInbConstants.EMPTY);
+        return FinalResponseStatus.builder().status(channelStatus).responseReason(safeReason).build();
+    }
+
+    public ICICIResponseDto mapCallBackResponse(ICICIResponseDto iciciResponseDto) {
+        return ICICIResponseDto.builder().atrn(iciciResponseDto.getAtrn()).prn(iciciResponseDto.getPrn()).itc(iciciResponseDto.getItc()).amount(iciciResponseDto.getAmount()).crn(iciciResponseDto.getCrn()).paId(iciciResponseDto.getPaId()).bId(iciciResponseDto.getBId()).build();
+    }
+
+    private PaymentFinalResponse validateCallBackResponse(ICICIResponseDto iciciResponseDto, ICICIDvResponseDto iciciDVResponseDto) {
+
+        if (iciciDVResponseDto == null) {
+            logger.warn("ICICI DV response is null for prn={} - failing closed", iciciResponseDto.getPrn());
+            return getRedirectObject(iciciResponseDto);
+        }
+
+        if (!otherInbpaymentValidator.validateWebAndDvAmt(iciciResponseDto.getAmount(), iciciDVResponseDto.getAmount())) {
+            logger.warn("ICICI DV amount mismatch for prn={}, webAmt={}, dvAmt={}", iciciResponseDto.getPrn(), iciciResponseDto.getAmount(), iciciDVResponseDto.getAmount());
+            return getRedirectObject(iciciResponseDto);
+        }
+
+        if (!otherInbpaymentValidator.ValidateBankReferenceNumber(iciciResponseDto.getPrn(), iciciDVResponseDto.getBId())) {
+            logger.warn("ICICI DV bank-reference mismatch for prn={}, bId={}", iciciResponseDto.getPrn(), iciciDVResponseDto.getBId());
+            return getRedirectObject(iciciResponseDto);
+        }
+
+        return null;
+    }
+
+    public ICICIDvResponseDto convertDvResponsetoDto(String iciciDvResponse) {
+        logger.info("Payment Callback MapDVResponseDto for ICICI {} ", iciciDvResponse);
+        try {
+            return new ObjectMapper().readValue(iciciDvResponse, ICICIDvResponseDto.class);
+        } catch (JsonProcessingException e) {
+            throw new OtherInbPaymentException(ErrorConstants.ICICI_DV_RESPONSE_PROCESS_ERROR_CODE, ErrorConstants.ICICI_DV_RESPONSE_PROCESS_MESSAGE);
+        }
+    }
+}
+
+============================================================
+FILE 1: PaymentFinalResponse.java
+============================================================
+
+package com.epay.otherinb.model.response;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonPropertyOrder;
+import com.google.gson.annotations.SerializedName;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import org.apache.commons.lang3.StringUtils;
+
+import java.io.Serializable;
+
+@NoArgsConstructor
+@AllArgsConstructor
+@Data
+@Builder
+@JsonPropertyOrder
+public class PaymentFinalResponse implements Serializable {
+    @SerializedName(value = "mId")
+    @JsonProperty(value = "mId")
+    private String mId = StringUtils.EMPTY;
+
+    @SerializedName(value = "merchantOrderNumber")
+    @JsonProperty(value = "merchantOrderNumber")
+    private String merchantOrderNumber = StringUtils.EMPTY;
+
+    @SerializedName(value = "sbiOrderId")
+    @JsonProperty(value = "sbiOrderId")
+    private String sbiOrderId = StringUtils.EMPTY;
+
+    @SerializedName(value = "orderAmount")
+    @JsonProperty(value = "orderAmount")
+    private String orderAmount = StringUtils.EMPTY;
+
+    @SerializedName(value = "totalAmount")
+    @JsonProperty(value = "totalAmount")
+    private String totalAmount = StringUtils.EMPTY;
+
+    @SerializedName(value = "atrn")
+    @JsonProperty(value = "atrn")
+    private String atrn = StringUtils.EMPTY;
+
+    @SerializedName(value = "transactionStatus")
+    @JsonProperty(value = "transactionStatus")
+    private String transactionStatus = StringUtils.EMPTY;
+
+    @SerializedName(value = "reason")
+    @JsonProperty(value = "reason")
+    private String reason = StringUtils.EMPTY;
+
+    @SerializedName(value = "CIN")
+    @JsonProperty(value = "CIN")
+    private String CIN = StringUtils.EMPTY;
+
+    @SerializedName(value = "otherDetails")
+    @JsonProperty(value = "otherDetails")
+    private String otherDetails = StringUtils.EMPTY;
+
+    @SerializedName(value = "bankName")
+    @JsonProperty(value = "bankName")
+    private String bankName = StringUtils.EMPTY;
+
+    @SerializedName(value = "bankTxnNumber")
+    @JsonProperty(value = "bankTxnNumber")
+    private String bankTxnNumber = StringUtils.EMPTY;
+
+    @SerializedName(value = "bankCode")
+    @JsonProperty(value = "bankCode")
+    private String bankCode = StringUtils.EMPTY;
+
+    @SerializedName(value = "customerId")
+    @JsonProperty(value = "customerId")
+    private String customerId = StringUtils.EMPTY;
+
+    @SerializedName(value = "orderRetryCount")
+    @JsonProperty(value = "orderRetryCount")
+    private String orderRetryCount = StringUtils.EMPTY;
+}
+============================================================
+FILE 1: RedirectView.java
+============================================================
+
+//
+// Source code recreated from a .class file by IntelliJ IDEA
+// (powered by FernFlower decompiler)
+//
+
+package org.springframework.web.servlet.view;
+
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.io.UnsupportedEncodingException;
+import java.lang.reflect.Array;
+import java.net.URLEncoder;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import org.springframework.beans.BeanUtils;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.context.WebApplicationContext;
+import org.springframework.web.servlet.HandlerMapping;
+import org.springframework.web.servlet.SmartView;
+import org.springframework.web.servlet.View;
+import org.springframework.web.servlet.support.RequestContextUtils;
+import org.springframework.web.servlet.support.RequestDataValueProcessor;
+import org.springframework.web.util.UriComponentsBuilder;
+import org.springframework.web.util.UriUtils;
+
+public class RedirectView extends AbstractUrlBasedView implements SmartView {
+    private static final Pattern URI_TEMPLATE_VARIABLE_PATTERN = Pattern.compile("\\{([^/]+?)\\}");
+    private boolean contextRelative = false;
+    private boolean http10Compatible = true;
+    private boolean exposeModelAttributes = true;
+    @Nullable
+    private String encodingScheme;
+    @Nullable
+    private HttpStatusCode statusCode;
+    private boolean expandUriTemplateVariables = true;
+    private boolean propagateQueryParams = false;
+    @Nullable
+    private String[] hosts;
+
+    public RedirectView() {
+        this.setExposePathVariables(false);
+    }
+
+    public RedirectView(String url) {
+        super(url);
+        this.setExposePathVariables(false);
+    }
+
+    public RedirectView(String url, boolean contextRelative) {
+        super(url);
+        this.contextRelative = contextRelative;
+        this.setExposePathVariables(false);
+    }
+
+    public RedirectView(String url, boolean contextRelative, boolean http10Compatible) {
+        super(url);
+        this.contextRelative = contextRelative;
+        this.http10Compatible = http10Compatible;
+        this.setExposePathVariables(false);
+    }
+
+    public RedirectView(String url, boolean contextRelative, boolean http10Compatible, boolean exposeModelAttributes) {
+        super(url);
+        this.contextRelative = contextRelative;
+        this.http10Compatible = http10Compatible;
+        this.exposeModelAttributes = exposeModelAttributes;
+        this.setExposePathVariables(false);
+    }
+
+    public void setContextRelative(boolean contextRelative) {
+        this.contextRelative = contextRelative;
+    }
+
+    public void setHttp10Compatible(boolean http10Compatible) {
+        this.http10Compatible = http10Compatible;
+    }
+
+    public void setExposeModelAttributes(final boolean exposeModelAttributes) {
+        this.exposeModelAttributes = exposeModelAttributes;
+    }
+
+    public void setEncodingScheme(String encodingScheme) {
+        this.encodingScheme = encodingScheme;
+    }
+
+    public void setStatusCode(HttpStatusCode statusCode) {
+        this.statusCode = statusCode;
+    }
+
+    public void setExpandUriTemplateVariables(boolean expandUriTemplateVariables) {
+        this.expandUriTemplateVariables = expandUriTemplateVariables;
+    }
+
+    public void setPropagateQueryParams(boolean propagateQueryParams) {
+        this.propagateQueryParams = propagateQueryParams;
+    }
+
+    public boolean isPropagateQueryProperties() {
+        return this.propagateQueryParams;
+    }
+
+    public void setHosts(@Nullable String... hosts) {
+        this.hosts = hosts;
+    }
+
+    @Nullable
+    public String[] getHosts() {
+        return this.hosts;
+    }
+
+    public boolean isRedirectView() {
+        return true;
+    }
+
+    protected boolean isContextRequired() {
+        return false;
+    }
+
+    protected void renderMergedOutputModel(Map<String, Object> model, HttpServletRequest request, HttpServletResponse response) throws IOException {
+        String targetUrl = this.createTargetUrl(model, request);
+        targetUrl = this.updateTargetUrl(targetUrl, model, request, response);
+        RequestContextUtils.saveOutputFlashMap(targetUrl, request, response);
+        this.sendRedirect(request, response, targetUrl, this.http10Compatible);
+    }
+
+    protected final String createTargetUrl(Map<String, Object> model, HttpServletRequest request) throws UnsupportedEncodingException {
+        StringBuilder targetUrl = new StringBuilder();
+        String url = this.getUrl();
+        Assert.state(url != null, "'url' not set");
+        if (this.contextRelative && url.startsWith("/")) {
+            targetUrl.append(this.getContextPath(request));
+        }
+
+        targetUrl.append(url);
+        String enc = this.encodingScheme;
+        if (enc == null) {
+            enc = request.getCharacterEncoding();
+        }
+
+        if (enc == null) {
+            enc = "ISO-8859-1";
+        }
+
+        if (this.expandUriTemplateVariables && StringUtils.hasText(targetUrl)) {
+            Map<String, String> variables = this.getCurrentRequestUriVariables(request);
+            targetUrl = this.replaceUriTemplateVariables(targetUrl.toString(), model, variables, enc);
+        }
+
+        if (this.isPropagateQueryProperties()) {
+            this.appendCurrentQueryParams(targetUrl, request);
+        }
+
+        if (this.exposeModelAttributes) {
+            this.appendQueryProperties(targetUrl, model, enc);
+        }
+
+        return targetUrl.toString();
+    }
+
+    private String getContextPath(HttpServletRequest request) {
+        String contextPath;
+        for(contextPath = request.getContextPath(); contextPath.startsWith("//"); contextPath = contextPath.substring(1)) {
+        }
+
+        return contextPath;
+    }
+
+    protected StringBuilder replaceUriTemplateVariables(String targetUrl, Map<String, Object> model, Map<String, String> currentUriVariables, String encodingScheme) throws UnsupportedEncodingException {
+        StringBuilder result = new StringBuilder();
+        Matcher matcher = URI_TEMPLATE_VARIABLE_PATTERN.matcher(targetUrl);
+
+        int endLastMatch;
+        for(endLastMatch = 0; matcher.find(); endLastMatch = matcher.end()) {
+            String name = matcher.group(1);
+            Object value = model.containsKey(name) ? model.remove(name) : currentUriVariables.get(name);
+            if (value == null) {
+                throw new IllegalArgumentException("Model has no value for key '" + name + "'");
+            }
+
+            result.append(targetUrl, endLastMatch, matcher.start());
+            result.append(UriUtils.encodePathSegment(value.toString(), encodingScheme));
+        }
+
+        result.append(targetUrl.substring(endLastMatch));
+        return result;
+    }
+
+    private Map<String, String> getCurrentRequestUriVariables(HttpServletRequest request) {
+        String name = HandlerMapping.URI_TEMPLATE_VARIABLES_ATTRIBUTE;
+        Map<String, String> uriVars = (Map)request.getAttribute(name);
+        return uriVars != null ? uriVars : Collections.emptyMap();
+    }
+
+    protected void appendCurrentQueryParams(StringBuilder targetUrl, HttpServletRequest request) {
+        String query = request.getQueryString();
+        if (StringUtils.hasText(query)) {
+            String fragment = null;
+            int anchorIndex = targetUrl.indexOf("#");
+            if (anchorIndex > -1) {
+                fragment = targetUrl.substring(anchorIndex);
+                targetUrl.delete(anchorIndex, targetUrl.length());
+            }
+
+            if (targetUrl.toString().indexOf(63) < 0) {
+                targetUrl.append('?').append(query);
+            } else {
+                targetUrl.append('&').append(query);
+            }
+
+            if (fragment != null) {
+                targetUrl.append(fragment);
+            }
+        }
+
+    }
+
+    protected void appendQueryProperties(StringBuilder targetUrl, Map<String, Object> model, String encodingScheme) throws UnsupportedEncodingException {
+        String fragment = null;
+        int anchorIndex = targetUrl.indexOf("#");
+        if (anchorIndex > -1) {
+            fragment = targetUrl.substring(anchorIndex);
+            targetUrl.delete(anchorIndex, targetUrl.length());
+        }
+
+        boolean first = targetUrl.toString().indexOf(63) < 0;
+        Iterator var7 = this.queryProperties(model).entrySet().iterator();
+
+        while(var7.hasNext()) {
+            Map.Entry<String, Object> entry = (Map.Entry)var7.next();
+            Object rawValue = entry.getValue();
+            Object values;
+            if (rawValue != null && rawValue.getClass().isArray()) {
+                values = CollectionUtils.arrayToList(rawValue);
+            } else if (rawValue instanceof Collection) {
+                Collection<?> collection = (Collection)rawValue;
+                values = collection;
+            } else {
+                values = Collections.singleton(rawValue);
+            }
+
+            Iterator var15 = ((Collection)values).iterator();
+
+            while(var15.hasNext()) {
+                Object value = var15.next();
+                if (first) {
+                    targetUrl.append('?');
+                    first = false;
+                } else {
+                    targetUrl.append('&');
+                }
+
+                String encodedKey = this.urlEncode((String)entry.getKey(), encodingScheme);
+                String encodedValue = value != null ? this.urlEncode(value.toString(), encodingScheme) : "";
+                targetUrl.append(encodedKey).append('=').append(encodedValue);
+            }
+        }
+
+        if (fragment != null) {
+            targetUrl.append(fragment);
+        }
+
+    }
+
+    protected Map<String, Object> queryProperties(Map<String, Object> model) {
+        Map<String, Object> result = new LinkedHashMap();
+        model.forEach((name, value) -> {
+            if (this.isEligibleProperty(name, value)) {
+                result.put(name, value);
+            }
+
+        });
+        return result;
+    }
+
+    protected boolean isEligibleProperty(String key, @Nullable Object value) {
+        if (value == null) {
+            return false;
+        } else if (this.isEligibleValue(value)) {
+            return true;
+        } else {
+            Object element;
+            if (value.getClass().isArray()) {
+                int length = Array.getLength(value);
+                if (length == 0) {
+                    return false;
+                } else {
+                    for(int i = 0; i < length; ++i) {
+                        element = Array.get(value, i);
+                        if (!this.isEligibleValue(element)) {
+                            return false;
+                        }
+                    }
+
+                    return true;
+                }
+            } else if (value instanceof Collection) {
+                Collection<?> coll = (Collection)value;
+                if (coll.isEmpty()) {
+                    return false;
+                } else {
+                    Iterator var4 = coll.iterator();
+
+                    do {
+                        if (!var4.hasNext()) {
+                            return true;
+                        }
+
+                        element = var4.next();
+                    } while(this.isEligibleValue(element));
+
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+    }
+
+    protected boolean isEligibleValue(@Nullable Object value) {
+        return value != null && BeanUtils.isSimpleValueType(value.getClass());
+    }
+
+    protected String urlEncode(String input, String encodingScheme) throws UnsupportedEncodingException {
+        return URLEncoder.encode(input, encodingScheme);
+    }
+
+    protected String updateTargetUrl(String targetUrl, Map<String, Object> model, HttpServletRequest request, HttpServletResponse response) {
+        WebApplicationContext wac = this.getWebApplicationContext();
+        if (wac == null) {
+            wac = RequestContextUtils.findWebApplicationContext(request, this.getServletContext());
+        }
+
+        if (wac != null && wac.containsBean("requestDataValueProcessor")) {
+            RequestDataValueProcessor processor = (RequestDataValueProcessor)wac.getBean("requestDataValueProcessor", RequestDataValueProcessor.class);
+            return processor.processUrl(request, targetUrl);
+        } else {
+            return targetUrl;
+        }
+    }
+
+    protected void sendRedirect(HttpServletRequest request, HttpServletResponse response, String targetUrl, boolean http10Compatible) throws IOException {
+        String encodedURL = this.isRemoteHost(targetUrl) ? targetUrl : response.encodeRedirectURL(targetUrl);
+        HttpStatusCode attributeStatusCode;
+        if (http10Compatible) {
+            attributeStatusCode = (HttpStatusCode)request.getAttribute(View.RESPONSE_STATUS_ATTRIBUTE);
+            if (this.statusCode != null) {
+                response.setStatus(this.statusCode.value());
+                response.setHeader("Location", encodedURL);
+            } else if (attributeStatusCode != null) {
+                response.setStatus(attributeStatusCode.value());
+                response.setHeader("Location", encodedURL);
+            } else {
+                response.sendRedirect(encodedURL);
+            }
+        } else {
+            attributeStatusCode = this.getHttp11StatusCode(request, response, targetUrl);
+            response.setStatus(attributeStatusCode.value());
+            response.setHeader("Location", encodedURL);
+        }
+
+    }
+
+    protected boolean isRemoteHost(String targetUrl) {
+        if (ObjectUtils.isEmpty(this.getHosts())) {
+            return false;
+        } else {
+            String targetHost = UriComponentsBuilder.fromUriString(targetUrl).build().getHost();
+            if (!StringUtils.hasLength(targetHost)) {
+                return false;
+            } else {
+                String[] var3 = this.getHosts();
+                int var4 = var3.length;
+
+                for(int var5 = 0; var5 < var4; ++var5) {
+                    String host = var3[var5];
+                    if (targetHost.equals(host)) {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+        }
+    }
+
+    protected HttpStatusCode getHttp11StatusCode(HttpServletRequest request, HttpServletResponse response, String targetUrl) {
+        if (this.statusCode != null) {
+            return this.statusCode;
+        } else {
+            HttpStatusCode attributeStatusCode = (HttpStatusCode)request.getAttribute(View.RESPONSE_STATUS_ATTRIBUTE);
+            return (HttpStatusCode)(attributeStatusCode != null ? attributeStatusCode : HttpStatus.SEE_OTHER);
+        }
+    }
+}
+============================================================
+FILE 1: ICICIPaymentWebClientService.java
+============================================================
+package com.epay.otherinb.externalservice;
+
+import com.epay.otherinb.config.OtherInbConfigDetails;
+import com.epay.otherinb.exceptions.OtherInbPaymentException;
+import com.epay.otherinb.util.constants.ErrorConstants;
+import com.epay.otherinb.util.constants.OtherInbConstants;
+import com.epay.otherinb.util.encryptdecryptutil.ICICIRetailEncryptionDecryptionUtil;
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Mono;
+import reactor.util.retry.Retry;
+
+import java.text.MessageFormat;
+import java.time.Duration;
+import java.util.Optional;
+import java.util.function.Supplier;
+
+@RequiredArgsConstructor
+@Component
+public class ICICIPaymentWebClientService {
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+    private final OtherInbConfigDetails otherInbConfigDetails;
+    private final ICICIRetailEncryptionDecryptionUtil iciciRetailEncryptionDecryptionUtil;
+
+    public String processingDoubleVerRequest(String plainDVRequest) {
+        try {
+            String encryptedDVData = iciciRetailEncryptionDecryptionUtil.iciciEncrypt(plainDVRequest);
+            logger.info("Payment Callback Encrypted and Encoded Double Verification {} " + encryptedDVData);
+            String DVResponse = Optional.ofNullable(ICICIDVResponseConn(otherInbConfigDetails.getMerchantResponseView(), (OtherInbConstants.ICICI_MERCH_CODE_CONST_URL).concat("mid").concat(OtherInbConstants.ICICI_ENC_DATA).concat(encryptedDVData))).filter(x -> !x.isEmpty()).orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.DOUBLE_VERIFICATION_ERROR_CODE, ErrorConstants.DOUBLE_VERIFICATION_ERROR_MESSAGE));
+            logger.info("Payment Callback Encrypted Double Verification Response {} ", DVResponse);
+            return DVResponse;
+        } catch (Exception e) {
+            logger.error("Exception While processingDoubleVerRequest  {}", e);
+            throw new OtherInbPaymentException(ErrorConstants.DOUBLE_VERIFICATION_ERROR_CODE, ErrorConstants.DOUBLE_VERIFICATION_ERROR_MESSAGE);
+        }
+    }
+
+    public String ICICIDVResponseConn(String bankdvurl, String encryptedData) {
+        logger.info("Other INB DV Request posting parameters DV Url {} and encryptedData {} ", bankdvurl + encryptedData);
+        LoggerUtility logger = LoggerFactoryUtility.getLogger(ICICIPaymentWebClientService.class);
+        logger.info("Other INB DV Request posting parameters DV Url {} and encryptedData {} ", bankdvurl, encryptedData);
+        try {
+            WebClient webClient = WebClient.builder().baseUrl(bankdvurl).build();
+            logger.info("webClient URL for other INB {} ", webClient);
+
+            return webClient.post().header(OtherInbConstants.REQUESTPROPERTY, OtherInbConstants.URL_ENCODED_CONTENT_TYPE).bodyValue(encryptedData).retrieve().onStatus(status -> {
+                logger.info("DV Response received status for other INB {} ", status);
+                return !status.is2xxSuccessful();
+            }, clientResponse -> clientResponse.bodyToMono(String.class).flatMap(errorBody -> Mono.error(((Supplier<RuntimeException>) () -> new OtherInbPaymentException(ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE, MessageFormat.format(ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE, OtherInbConstants.SBI_INB_SERVICE))).get()))).bodyToMono(String.class).doOnNext(body -> {
+                logger.info("responseCode for other INB {} ", body);
+            }).doOnError(error -> {
+                logger.info("error responseCode for other INB {} ", error);
+            }).onErrorResume(error -> {
+                logger.info("error responseCode for other INB {} ", error);
+                return Mono.error(() -> new OtherInbPaymentException(ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE, MessageFormat.format(ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE, OtherInbConstants.OTHER_INB_SERVICE)));
+            }).retryWhen(Retry.fixedDelay(3, Duration.ofSeconds(1)).filter(throwable -> throwable instanceof OtherInbPaymentException).doBeforeRetry(retrySignal -> logger.info("Retrying attempt {} due to error: {}", retrySignal.totalRetries() + 1, retrySignal.failure().getMessage()))).block();
+        } catch (Exception e) {
+            logger.error("Exception While otherINBDVResponseConn  {}", e);
+            throw new OtherInbPaymentException(ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE, MessageFormat.format(ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE, OtherInbConstants.OTHER_INB_SERVICE));
+        }
+    }
+}
+============================================================
+FILE 1: ICICIRetailEncryptionDecryptionUtil.java
+============================================================
+@RequiredArgsConstructor
+@Component
+public class ICICIRetailEncryptionDecryptionUtil {
+
+    private static Cipher c;
+    private static String sAlgorithm;
+    private static Key encryptDecryptKey;
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+    @Autowired
+    private OtherInbPaymentDao otherInbPaymentDao;
+    @Autowired
+    private OtherInbFormPostingUtil otherInbFormPostingUtil;
+
+    public ICICIRetailEncryptionDecryptionUtil(String sMasterKey) throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException {
+        String sKey = "";
+        String sAlgorithm = "AES";
+        sKey = sMasterKey.trim();
+        if (sKey.length() != 16) {
+            throw new InvalidKeyException("Master Key should be of 16 Characters");
+        } else {
+            byte[] sKeyBytes = sKey.getBytes();
+            encryptDecryptKey = (Key) (new SecretKeySpec(sKeyBytes, sAlgorithm));
+            c = Cipher.getInstance(sAlgorithm);
+
+        }
+    }
+
+    // WEB REQUEST INITIATION METHOD FOR ICICI BANK
+    public OtherInbPostingData processInitiate(PaymentRequest paymentWebRequest, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) throws Exception {
+
+        DateTimeFormatter dateTime = DateTimeFormatter.ofPattern(OtherInbConstants.TXN_DATETIME_FORMAT); // dd/MM/YYYY HH:mm:ss
+        String txnDateTime = LocalDateTime.now().format(dateTime);
+        logger.info("dateTimeString. {} for ICICI Bank ", txnDateTime);
+        String planeTextWebReqData = createWebRequest(transactionDto, otherInbChannelUnitMappingDto, txnDateTime);
+        logger.info("planeTextWebReqData. {} for ICICI Bank ", planeTextWebReqData);
+        otherInbPaymentDao.saveRequestLog(planeTextWebReqData, paymentWebRequest.getAtrn(), OtherInbConstants.WEB_REQUEST_TYPE, OtherInbConstants.CREATED_BY_ICICI);
+        return OtherInbPostingData.builder().atrn(transactionDto.getAtrnNum()).merchIdVal(transactionDto.getMerchantId()).encryptTrans(otherInbFormPostingUtil.getFormPostingData(otherInbFormPostingUtil.getForm_ICICIRetail(encryptedPostedData(planeTextWebReqData, otherInbChannelUnitMappingDto, transactionDto).getData(), transactionDto, otherInbChannelUnitMappingDto), otherInbChannelUnitMappingDto, transactionDto)).build();
+
+    }
+
+    // WEB REQUEST CREATION METHOD
+    public String createWebRequest(TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto, String txnDateTime) {
+        return MessageFormat.format(String.valueOf(otherInbChannelUnitMappingDto.getWebRequestFormat()), transactionDto.getAtrnNum(), "MSEDCL", transactionDto.getDebitAmt(), transactionDto.getCurrencyCode(), otherInbChannelUnitMappingDto.getChannelReturnUrl(), "Y");
+    }
+
+    public PostingData encryptedPostedData(String planeTextWebReqData, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto, TransactionDto transactionDto) throws Exception {
+//        String encWebReqData = iciciEncrypt(planeTextWebReqData, otherInbChannelUnitMappingDto.getCommonEncKey());
+        String encWebReqData = new ICICIRetailEncryptionDecryptionUtil("uxowYdKK3so2w6Ad").iciciEncrypt(planeTextWebReqData);
+//        return PostingData.builder().data(encWebReqData).build();
+        return PostingData.builder().data(planeTextWebReqData).build();
+    }
+
+    public String iciciEncrypt(String stringToEncrypt) throws InvalidKeyException, IllegalStateException, IllegalBlockSizeException, BadPaddingException {
+        c.init(1, encryptDecryptKey);
+        BASE64Encoder base64encoder = new BASE64Encoder();
+        String sEncString = base64encoder.encode(c.doFinal(stringToEncrypt.getBytes()));
+        sEncString = sEncString.replaceAll("\n", "");
+        sEncString = sEncString.replaceAll("\r", "");
+        return sEncString;
+    }
+
+    public String iciciDecrypt(String stringToDecrypt) throws InvalidKeyException, IOException, IllegalStateException, IllegalBlockSizeException, BadPaddingException {
+        c.init(2, encryptDecryptKey);
+        BASE64Decoder base64decoder = new BASE64Decoder();
+        byte[] ciphertext = (byte[]) null;
+        byte[] cleartext = base64decoder.decodeBuffer(this.replaceSpecialChars(stringToDecrypt));
+        ciphertext = c.doFinal(cleartext);
+        return this.bytes2String(ciphertext);
+    }
+
+    private String bytes2String(byte[] bytes) {
+        StringBuffer stringBuffer = new StringBuffer();
+
+        for (int i = 0; i < bytes.length; ++i) {
+            stringBuffer.append((char) bytes[i]);
+        }
+
+        return stringBuffer.toString();
+    }
+
+    private String replaceSpecialChars(String str) {
+        StringBuffer sb = new StringBuffer();
+
+        for (int i = 0; i < str.length(); ++i) {
+            if (str.charAt(i) == ' ') {
+                sb.append('+');
+            } else {
+                sb.append(str.charAt(i));
+            }
+        }
+        return sb.toString();
+    }
+
+    public Map<String, String> getDecryptedData(String decResponse) {
+
+        if (decResponse == null || decResponse.trim().isEmpty()) {
+            throw new OtherInbPaymentException(ErrorConstants.WEB_CHECKSUM_ERROR_CODE, ErrorConstants.WEB_CHECKSUM_MISMATCH_ERROR_MESSAGE);
+        }
+
+        return Optional.of(Arrays.stream(decResponse.split("\\|")).map(kv -> kv.split(OtherInbConstants.PATTERN_EQUAL_TO_CONST)).filter(kvArray -> kvArray.length > 1).collect(Collectors.toMap(kv -> kv[0], kv -> StringUtils.isBlank(kv[1]) ? OtherInbConstants.NA : kv[1].trim()))).orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.WEB_CHECKSUM_ERROR_CODE, ErrorConstants.WEB_CHECKSUM_MISMATCH_ERROR_MESSAGE));
+    }
+
+    public String getDvRespDecryptedData(String encryptedData) throws Exception {
+        return null;
+    }
+
+    public String formatedAmount(BigDecimal amount) {
+        if (amount == null) {
+            return OtherInbConstants.EMPTY;
+        }
+        BigDecimal convertedAmount = amount.setScale(2, BigDecimal.ROUND_UP);
+        DecimalFormat df = new DecimalFormat("0.00");
+        return df.format(convertedAmount);
+    }
+
+    public ICICIDvResponseDto processICICIDoubleVerRequest(ICICIResponseDto iciciResponseDto) {
+        ICICIDvResponseDto dto = new ICICIDvResponseDto();
+        return dto;
+    }
+
+    public String getCallBackResponse(String mid, String orderid) {
+        return "plainDvRequestAndChecksum";
+    }
+
+    public String processICICIDoubleVerRequest1(ICICIResponseDto MapWebResponseDto) {
+        return "ddf";
+    }
+}
+
+============================================================
+FILE 1: ICICIRetailEncryptionDecryptionUtil.java
+============================================================
+package com.epay.otherinb.validator;
+
+import com.epay.otherinb.dto.*;
+import com.epay.otherinb.exceptions.OtherInbPaymentException;
+import com.epay.otherinb.model.response.CanaraRetailCorpWebResponse;
+import com.epay.otherinb.model.response.PSBRetailCorpWebResponse;
+import com.epay.otherinb.util.constants.ErrorConstants;
+import com.epay.otherinb.util.constants.OtherInbConstants;
+import lombok.RequiredArgsConstructor;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.stereotype.Component;
+
+import java.math.BigDecimal;
+import java.text.MessageFormat;
+import java.util.Map;
+import java.util.Objects;
+
+/**
+ * Class Name:OtherInbPaymentValidator
+ * *
+ * Description: Other Inb Payment Service
+ * *
+ * Author: VCE2645 - Siddhesh Nikam (Dev Lead SBIePAY)
+ * Copyright (c) 2026 [State Bank of India]
+ * All rights reserved
+ * *
+ * Version:1.0
+ */
+
+@Component
+@RequiredArgsConstructor
+public class OtherInbPaymentValidator extends BaseValidator {
+
+    public synchronized void validateOtherInbInitiationRequest(String atrn_num) {
+        errorDtoList.clear();
+        validateOINBRequest(atrn_num);
+    }
+
+    //Other INB Validator..
+    public void validateOINBRequest(String atrn_num) {
+        errorDtoList.clear();
+        checkMandatoryField(atrn_num, OtherInbConstants.ATRN);
+        checkForLeadingTrailingAndSingleSpace(atrn_num, OtherInbConstants.ATRN);
+        validateFieldLength(atrn_num, OtherInbConstants.ATRN_LENGTH, OtherInbConstants.ATRN);
+        validateFieldWithRegex(atrn_num, OtherInbConstants.ATRN_ARRN_REGEX_DIGIT, OtherInbConstants.ATRN, OtherInbConstants.INVALID_ATRN_CONST);
+    }
+
+
+
+//    //BOM Validator
+//    public boolean checkResponseParamDataBom(String decryptedWebResponse) {
+////        return decryptedWebResponse.contains(OtherInbConstants.PID_CONST) && decryptedWebResponse.contains(OtherInbConstants.BRN_CONST)
+////                && decryptedWebResponse.contains(OtherInbConstants.AMT_CONST) && decryptedWebResponse.contains(OtherInbConstants.MODE_CONST)
+////                && decryptedWebResponse.contains(OtherInbConstants.NAR_CONST) && decryptedWebResponse.contains(OtherInbConstants.TID_CONST)
+////                && decryptedWebResponse.contains(OtherInbConstants.STATUS_CONST)
+////                && decryptedWebResponse.contains(OtherInbConstants.TDATETIME_CONST)
+////                && decryptedWebResponse.contains(OtherInbConstants.CURRENCY_CONST);
+//    }
+    public void validateNBCallBack(BOMMapWebResponseDto nbCallBackResponse) {
+        errorDtoList.clear();
+
+//        checkMandatoryField(nbCallBackResponse.getTxnAmount(), OtherInbConstants.AMOUNT);
+//        checkMandatoryField(nbCallBackResponse.getPrn(),OtherInbConstants.BRN_CONST);
+//        checkMandatoryField(nbCallBackResponse.getNar(), OtherInbConstants.NAR_CONST);
+//        checkMandatoryField(nbCallBackResponse.getTid(), OtherInbConstants.TID_CONST);
+//        checkMandatoryField(nbCallBackResponse.getStatus(), OtherInbConstants.STATUS);
+//
+//        checkForLeadingTrailingAndSingleSpace(nbCallBackResponse.getTxnAmount(), OtherInbConstants.AMOUNT);
+//        checkForLeadingTrailingAndSingleSpace(String.valueOf(nbCallBackResponse.getPrn()), OtherInbConstants.BRN_CONST);
+//        checkForLeadingTrailingAndSingleSpace(nbCallBackResponse.getNar(), OtherInbConstants.NAR_CONST);
+//        checkForLeadingTrailingAndSingleSpace(nbCallBackResponse.getTid(), OtherInbConstants.TID_CONST);
+//        checkForLeadingTrailingAndSingleSpace(nbCallBackResponse.getStatus(), OtherInbConstants.STATUS);
+//
+//        validateFieldWithRegex(nbCallBackResponse.getPrn(), OtherInbConstants.ATRN_ARRN_REGEX_DIGIT, OtherInbConstants.BRN_CONST,OtherInbConstants.INVALID_ATRN_CONST);
+//        validateFieldLength(nbCallBackResponse.getPrn(), OtherInbConstants.ATRN_LENGTH, OtherInbConstants.BRN_CONST);
+    }
+
+    public synchronized void validateDebitAmount(BigDecimal debitAmt) {
+        errorDtoList.clear();
+        //validateAmountFormat(debitAmt);
+        throwIfErrors();
+    }
+    void validateAmountFormat(BigDecimal debitAmt) {
+        if (Objects.isNull(debitAmt) || (debitAmt.signum() <= 0)) {
+            addError(ErrorConstants.INVALID_ERROR_CODE, MessageFormat.format(ErrorConstants.INVALID_ERROR_MESSAGE, OtherInbConstants.DEBIT_AMOUNT_CONST,OtherInbConstants.DEBIT_AMOUNT_GREATER_ZERO_CONST));
+        }
+
+    }
+    public void validateNBCallBack(RBLRetailResponseDto rblRetailResponseDto) {
+        errorDtoList.clear();
+        /*System.out.println("Mandatory field validation start");
+        checkMandatoryField(String.valueOf(rblRetailResponseDto.getAmount()), OtherInbConstants.AMT);
+        System.out.println("Mandatory field validated - AMT");
+        checkMandatoryField(rblRetailResponseDto.getRefNo(), OtherInbConstants.REFNO);
+        System.out.println("Mandatory field validated - REFNO");
+        checkMandatoryField(rblRetailResponseDto.getStatus(), OtherInbConstants.STATUS);
+        System.out.println("Mandatory field validated - STATUS");
+        //checkMandatoryField(bobNbMapWebResponseDto.getStatus_desc(), PaymentConstants.STATUS_DESC);
+        checkMandatoryField(rblRetailResponseDto.getCheckSum(), OtherInbConstants.CHECKSUM);
+
+            System.out.println("Mandatory field validated - CHECKSUM");*/
+    }
+
+    public boolean checkBOBResponseParamData(String decryptedWebResponse) {
+        return true;//decryptedWebResponse.contains(OtherInbConstants.PAID) && decryptedWebResponse.contains(OtherInbConstants.ITC) && decryptedWebResponse.contains(OtherInbConstants.PRN) && decryptedWebResponse.contains(OtherInbConstants.PID) && decryptedWebResponse.contains(OtherInbConstants.BID) && decryptedWebResponse.contains(OtherInbConstants.AMT);
+    }
+
+    public boolean checkSum(String bankChecksum, String createdChecksum) {
+        errorDtoList.clear();
+        return true;//checkSumFieldMatched(bankChecksum, createdChecksum);
+    }
+
+    private boolean checkSumFieldMatched(String bankChecksum, String createdChecksum) {
+        return !bankChecksum.isEmpty() && bankChecksum.equals(createdChecksum);
+    }
+
+    // Ref no not blank, null and zero
+    public boolean ValidateWebResponsePid(String pid) {
+        return StringUtils.isNotBlank(pid) && !pid.equals("0");
+    }
+
+    public void validateNBCallBack(IndusindRetailNbResponseDto indusindRetailNbResponseDto) {
+        errorDtoList.clear();
+        /*checkMandatoryField(String.valueOf(indusindRetailNbResponseDto.getAmt()), OtherInbConstants.AMT);
+        checkMandatoryField(indusindRetailNbResponseDto.getBid(), OtherInbConstants.BID);
+        checkMandatoryField(indusindRetailNbResponseDto.getPaid(), OtherInbConstants.PAID);
+        //checkMandatoryField(bobNbMapWebResponseDto.getStatus_desc(), PaymentConstants.STATUS_DESC);
+        checkMandatoryField(indusindRetailNbResponseDto.getCheckSum(), OtherInbConstants.CHECKSUM);*/
+    }
+
+    public void validateNBCallBack(CBIResponseDto cbiResponseDto) {
+        errorDtoList.clear();
+
+    }
+
+    public void validateOINBRequiredCallBack(String value, String fieldName) {
+        if (value == null) {
+            errorDtoList.clear();
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, MessageFormat.format(ErrorConstants.REQUIRED_ERROR_MESSAGE, fieldName));
+            throwIfErrors();
+        }
+        if ((fieldName.equalsIgnoreCase(OtherInbConstants.STATUS) && !OtherInbConstants.SUCCESS.equalsIgnoreCase(value))
+                && !OtherInbConstants.FAILURE.equalsIgnoreCase(value)
+                && !OtherInbConstants.PENDING_CONST.equalsIgnoreCase(value)
+                && value.length() <=25){
+            errorDtoList.clear();
+            addError(fieldName, ErrorConstants.INVALID_ERROR_CODE, MessageFormat.format(ErrorConstants.INVALID_ERROR_MESSAGE, fieldName, OtherInbConstants.INVALID_TXN_STATUS_FORMAT));
+            throwIfErrors();
+        }
+
+    }
+
+    public void validateOINBAmountCallBack(String amount, String fieldName) {
+        if (OtherInbConstants.NA.equalsIgnoreCase(amount)) {
+            errorDtoList.clear();
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+
+//        } else if (!StringUtils.isNotBlank(amount)) {
+//            errorDtoList.clear();
+//            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+        } else if (!amount.matches(OtherInbConstants.NUMBER_DECIMAL_REGEX)) {
+            errorDtoList.clear();
+            validateFieldWithRegex(amount, OtherInbConstants.NUMBER_DECIMAL_REGEX, fieldName, "INCORRECT_FORMAT");
+            throwIfErrors();
+        } else if (new BigDecimal(amount).signum() <= 0) {
+            errorDtoList.clear();
+            addError(fieldName, ErrorConstants.INVALID_ERROR_CODE, MessageFormat.format(ErrorConstants.INVALID_ERROR_MESSAGE, fieldName, "Amount must be greater than 0"));
+            throwIfErrors();
+        } else if(new BigDecimal(amount).scale() > 2){
+            //   logger.info("validate Payment Initiation, Validating up to 2 decimal point: {}",new BigDecimal(amount));
+            errorDtoList.clear();
+            addError(ErrorConstants.INVALID_ERROR_CODE, MessageFormat.format(ErrorConstants.INVALID_ERROR_MESSAGE, fieldName, "Validating up to 2 decimal point"));
+            throwIfErrors();
+        }
+//        }else if (StringUtils.isNotEmpty(new BigDecimal(amount).toString()) && (new BigDecimal(amount).precision()- new BigDecimal(amount).scale()) > 18) {
+//            errorDtoList.clear();
+//         //   logger.info("field {} exceeds maxLength {}", fieldName, 18);
+//            addError(ErrorConstants.INVALID_ERROR_CODE, "The maximum allowed length for Debit amount before decimal is 18.");
+//            throwIfErrors();
+//        }
+        else {
+            errorDtoList.clear();
+            validateFieldWithRegex(amount, OtherInbConstants.AMOUNT_REGEX, fieldName, "INCORRECT_FORMAT");
+            throwIfErrors();
+        }
+    }
+
+
+
+    public boolean checkResponseParamData(String decryptedWebResponse) {
+        return true; //decryptedWebResponse.contains(OtherInbConstants.STATUS) && decryptedWebResponse.contains(OtherInbConstants.REFNO) && decryptedWebResponse.contains(OtherInbConstants.PRN) && decryptedWebResponse.contains(OtherInbConstants.ITC) && decryptedWebResponse.contains(OtherInbConstants.AMT) && decryptedWebResponse.contains(OtherInbConstants.CRN) && decryptedWebResponse.contains(OtherInbConstants.ACNT_NUM);
+    }
+
+    public boolean checkIndusIndResponseParamData(String decryptedWebResponse) {
+        return true;//decryptedWebResponse.contains(OtherInbConstants.PAID) && decryptedWebResponse.contains(OtherInbConstants.ITC) && decryptedWebResponse.contains(OtherInbConstants.PRN) && decryptedWebResponse.contains(OtherInbConstants.PID) && decryptedWebResponse.contains(OtherInbConstants.BID) && decryptedWebResponse.contains(OtherInbConstants.AMT);
+    }
+
+    // Ref no not blank, null and zero
+    public boolean ValidateWebResponseBankReferenceNumber(String webSbiRefNo) {
+        return StringUtils.isNotBlank(webSbiRefNo) && !webSbiRefNo.equals("0");
+    }
+
+    public void validateNBCallBack(BobNbMapWebResponseDto bobNbMapWebResponseDto) {
+        errorDtoList.clear();
+        /*checkMandatoryField(String.valueOf(bobNbMapWebResponseDto.getAmount()), OtherInbConstants.AMT);
+        checkMandatoryField(bobNbMapWebResponseDto.getRefNo(), OtherInbConstants.REFNO);
+        checkMandatoryField(bobNbMapWebResponseDto.getStatus(), OtherInbConstants.STATUS);
+        //checkMandatoryField(bobNbMapWebResponseDto.getStatus_desc(), PaymentConstants.STATUS_DESC);
+        checkMandatoryField(bobNbMapWebResponseDto.getCheckSum(), OtherInbConstants.CHECKSUM);*/
+
+    }
+
+    public boolean checkResponseParamDataAxis(String decryptedWebResponse) {
+        return decryptedWebResponse.contains(OtherInbConstants.PAID) && decryptedWebResponse.contains(OtherInbConstants.ITC) && decryptedWebResponse.contains(OtherInbConstants.PRN) && decryptedWebResponse.contains(OtherInbConstants.PID) && decryptedWebResponse.contains(OtherInbConstants.BID) && decryptedWebResponse.contains(OtherInbConstants.AMT);
+    }
+
+    //********************************************** UBI Retail Validation Starts ***************************************************
+
+    public void validateUbiCallBackRequest(String request){
+        if (Objects.isNull(request) || request.isEmpty() || request.isBlank()){
+            throw new OtherInbPaymentException("500", "Invalid Request. QS data is Required.");
+        }
+    }
+
+    public boolean validateUBIWebResponse(String decryptedResponse){
+        return decryptedResponse.contains("PGID") && decryptedResponse.contains("BillerID") && decryptedResponse.contains("Amount") && decryptedResponse.contains("PGRef")
+                && decryptedResponse.contains("Status") && decryptedResponse.contains("CheckSum");
+    }
+
+    //********************************************** UBI Retail Validations End *****************************************************
+
+    //********************************************** Dhanalaxmi Retail Validations Starts *****************************************************
+    public void validateICICIcallBack(DhanalaxmiResponseDto respose){
+//        validateNBAmountCallBack(map.get(PaymentConstants.AMOUNT), PaymentConstants.AMOUNT);
+//        validateNBRequiredCallBack(map.get(PaymentConstants.WALLET_ORDERID), PaymentConstants.WALLET_ORDERID);
+//        validateNBRequiredCallBack(map.get(PaymentConstants.WALLET_STATUSCODE), PaymentConstants.WALLET_STATUSCODE);
+//        validateNBRequiredCallBack(map.get(PaymentConstants.WALLET_STATUSMESSAGE), PaymentConstants.WALLET_STATUSMESSAGE);
+
+    }
+
+  public void validateDhanalaxmiWebResponse(Map<String,String>  map ){
+
+  }
+
+//    static DecimalFormat formatter = new DecimalFormat(PaymentConstants.TWO_DECIMAl_DIGIT);
+    public boolean validateWebAndDvAmt(BigDecimal webAmt, BigDecimal DvAmt) {
+//        errorDtoList.clear();
+//        return  validateWebAndDVAmtFormat(webAmt,DvAmt);
+        return true;
+    }
+
+    private synchronized boolean validateWebAndDVAmtFormat(BigDecimal webAmt, BigDecimal dvAmt) {
+//        return (Objects.equals(new BigDecimal(formatter.format(webAmt)), new BigDecimal(formatter.format(dvAmt))));
+        return true;
+    }
+
+    public boolean ValidateBankReferenceNumber(String webSbiRefNo, String dvSbiRefNo) {
+//        return StringUtils.isNotBlank(webSbiRefNo) && !webSbiRefNo.equals("0") && !dvSbiRefNo.equals("0");
+        return true;
+    }
+
+    //********************************************** Dhanalaxmi Retail Validations End *****************************************************
+    public void validateOtherInbCallBack(SaraswatResponseDto saraswatCallBackResponse) {
+        errorDtoList.clear();
+        //validateFieldWithRegex(String.valueOf(saraswatCallBackResponse.getTxnAmount()), OtherInbConstants.AMOUNT_REGEX, OtherInbConstants.AMOUNT, OtherInbConstants.INVALID_TXN_AMT_FORMAT);
+    }
+    //********************************************** SOI Validations Start *****************************************************
+
+    public void validateOtherInbCallBack(SouthIndianResponseDto southIndianResponseDto) {
+        errorDtoList.clear();
+        //validateFieldWithRegex(String.valueOf(southIndianResponseDto.getBtxnAmt()), OtherInbConstants.AMOUNT_REGEX, OtherInbConstants.AMOUNT, OtherInbConstants.INVALID_TXN_AMT_FORMAT);
+    }
+    /******PSB Amount validation***/
+    public void validateOtherInbCallBack(PSBRetailCorpWebResponse psbRetailCorpWebResponse) {
+        errorDtoList.clear();
+        //validateFieldWithRegex(String.valueOf(psbRetailCorpWebResponse.getAmt()), OtherInbConstants.AMOUNT_REGEX, OtherInbConstants.PARAM_AMOUNT, OtherInbConstants.INVALID_TXN_AMT_FORMAT);
+    }
+    /******Canara Amount validation***/
+    public void validateOtherInbCallBack(CanaraRetailCorpWebResponse canaraRetailCorpWebResponse) {
+        errorDtoList.clear();
+        //validateFieldWithRegex(String.valueOf(canaraRetailCorpWebResponse.getFldTxnAmt()), OtherInbConstants.AMOUNT_REGEX, OtherInbConstants.PARAM_AMOUNT, OtherInbConstants.INVALID_TXN_AMT_FORMAT);
+    }
+    //******************************iob***********************************
+    public void validateNBCallBack(IobCallbackResponse iobCallbackResponse) {
+        errorDtoList.clear();
+        System.out.println("Mandatory field validation start");
+        checkMandatoryField(String.valueOf(iobCallbackResponse.getAmt()), OtherInbConstants.AMT);
+        System.out.println("Mandatory field validated - AMT");
+        checkMandatoryField(iobCallbackResponse.getBid(), OtherInbConstants.BID);
+        System.out.println("Mandatory field validated - BID");
+        checkMandatoryField(iobCallbackResponse.getPaid(), OtherInbConstants.PAID);
+        System.out.println("Mandatory field validated - PAID");
+        //checkMandatoryField(bobNbMapWebResponseDto.getStatus_desc(), PaymentConstants.STATUS_DESC);
+        checkMandatoryField(iobCallbackResponse.getCheckSum(), OtherInbConstants.CHECKSUM);
+
+        System.out.println("Mandatory field validated - CHECKSUM");
+
+    }
+
+    //********************************************** ICICI Validations Starts *****************************************************
+
+    public void validateICICIcallBack (ICICIResponseDto respose){
+//        validateNBAmountCallBack(map.get(PaymentConstants.AMOUNT), PaymentConstants.AMOUNT);
+//        validateNBRequiredCallBack(map.get(PaymentConstants.WALLET_ORDERID), PaymentConstants.WALLET_ORDERID);
+//        validateNBRequiredCallBack(map.get(PaymentConstants.WALLET_STATUSCODE), PaymentConstants.WALLET_STATUSCODE);
+//        validateNBRequiredCallBack(map.get(PaymentConstants.WALLET_STATUSMESSAGE), PaymentConstants.WALLET_STATUSMESSAGE);
+
+    }
+
+    public void validateICICIWebResponse(Map<String,String>  map ){
+
+    }
+
+    //********************************************** ICICI Validations End *****************************************************
+
+
+}
+============================================================
+FILE 1: ICICIResponseDto.java
+============================================================
+package com.epay.otherinb.dto;
+
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+import java.math.BigDecimal;
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+@Builder
+public class ICICIResponseDto {
+    private String atrn;
+    private String prn;
+    private String itc;
+    private BigDecimal amount;
+    private String crn;
+    private String paId;
+    private String bId;
+}
+============================================================
+FILE 1: ICICIDvResponseDto.java
+============================================================
+package com.epay.otherinb.dto;
+
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+import java.math.BigDecimal;
+
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+@Builder
+public class ICICIDvResponseDto {
+    private String atrn;
+    private String prn;
+    private String bId;
+    private String paId;
+    private BigDecimal amount;
+}
+============================================================
+FILE 1: OtherInbFormPostingUtil.java
+============================================================
+
+package com.epay.otherinb.util.posting;
+
+import com.epay.otherinb.dto.OtherInbChannelUnitMappingDto;
+import com.epay.otherinb.dto.TransactionDto;
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.HashMap;
+import java.util.Map;
+
+import static com.epay.otherinb.util.constants.OtherInbConstants.*;
+
+
+/**
+ * Class Name:OtherInbFormPostingUtil
+ * *
+ * Description: Card Payment Service
+ * *
+ * Author: VCE2645 - Siddhesh Nikam (Dev Lead SBIePAY)
+ * Copyright (c) 2026 [State Bank of India]
+ * All rights reserved
+ * *
+ * Version:1.0
+ */
+@Component
+@RequiredArgsConstructor
+public class OtherInbFormPostingUtil {
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+
+    //Common Form Posting All Banks Do not modify this method
+    private String getTemp(String formPostingTemplate, HashMap<String,String> values) {
+        for (HashMap.Entry<String, String> entry : values.entrySet()){
+            formPostingTemplate = formPostingTemplate.replace("{" + entry.getKey() + "}", entry.getValue());
+        }
+        logger.info("formPostingTemplate. {}", formPostingTemplate);
+        return formPostingTemplate;
+    }
+    //Common Form Posting All Banks Do not modify this method
+    public String getFormPostingData(HashMap<String, String> map, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto, TransactionDto transactionDto) throws NoSuchMethodException {
+        String decodedHtmlTemplate = new String(Base64.getDecoder().decode(otherInbChannelUnitMappingDto.getFormPostingTemplate()), StandardCharsets.UTF_8);
+        logger.info("decoded html template. {} and map. {}", decodedHtmlTemplate, map);
+        String prePareTemplate = getTemp(decodedHtmlTemplate,map );
+        logger.info("prePare Template. {}", prePareTemplate);
+        byte[] encodedTemplate = Base64.getEncoder().encode(prePareTemplate.getBytes());
+//        return new String(encodedTemplate, StandardCharsets.UTF_8);
+        return prePareTemplate;
+    }
+
+    //Boi retail form posting template
+    public HashMap<String, String>  getForm_BOI(String encData, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) {
+        HashMap<String, String> map= new HashMap<>();
+        map.put("ACTION_URL",otherInbChannelUnitMappingDto.getBankUrl());
+        map.put("METHOD",otherInbChannelUnitMappingDto.getFormPostingMethod());
+        map.put("data",encData);
+        map.put("PID",transactionDto.getGatewayIssueMECode());
+        logger.info("map for BOI. {}", map);
+        return map;
+    }
+
+
+    //Saraswat retail form posting template
+    public HashMap<String, String>  getForm_SARASWAT(String encData, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) {
+        HashMap<String, String> map= new HashMap<>();
+        map.put("ACTION_URL",otherInbChannelUnitMappingDto.getBankUrl());
+        map.put("METHOD",otherInbChannelUnitMappingDto.getFormPostingMethod());
+        map.put("data",encData);
+        map.put("PID",transactionDto.getGatewayIssueMECode());
+        return map;
+    }
+
+    //South Indian Bank form posting template
+    public HashMap<String, String>  getForm_SIB(String encData, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) {
+        HashMap<String, String> map= new HashMap<>();
+        map.put("ACTION_URL",otherInbChannelUnitMappingDto.getBankUrl());
+        map.put("METHOD",otherInbChannelUnitMappingDto.getFormPostingMethod());
+        map.put("data",encData);
+        map.put("PID",transactionDto.getGatewayIssueMECode());
+        return map;
+    }
+
+
+    //IOB retail corp form posting template
+    public HashMap<String, String>  getForm_IOB(String encData, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) {
+        HashMap<String, String> map= new HashMap<>();
+        map.put("ACTION_URL",otherInbChannelUnitMappingDto.getBankUrl());
+        map.put("METHOD",otherInbChannelUnitMappingDto.getFormPostingMethod());
+        map.put("PDATA",encData);
+        return map;
+    }
+
+    //Bandhan corp form posting template
+    public HashMap<String, String>  getForm_BandhanCorp(String encData, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) {
+        HashMap<String, String> map= new HashMap<>();
+        map.put("ACTION_URL",otherInbChannelUnitMappingDto.getBankUrl());
+        map.put("METHOD",otherInbChannelUnitMappingDto.getFormPostingMethod());
+        map.put("mercode",transactionDto.getGatewayIssueMECode());
+        map.put("encData",encData);
+        return map;
+    }
+
+    //BOB form posting template
+    public HashMap<String, String>  getForm_BOB(String encData, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) {
+        HashMap<String, String> map= new HashMap<>();
+        map.put("ACTION_URL",otherInbChannelUnitMappingDto.getBankUrl());
+        map.put("METHOD",otherInbChannelUnitMappingDto.getFormPostingMethod());
+        map.put("RU",encData);
+        map.put("CATEGORY_ID",transactionDto.getGatewayIssueMECode());
+        map.put("QS",encData);
+        return map;
+    }
+
+    //RBL Retail form posting template
+    public HashMap<String, String>  getForm_RBL(String encData, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) {
+        HashMap<String, String> map= new HashMap<>();
+        map.put("ACTION_URL",otherInbChannelUnitMappingDto.getBankUrl());
+        map.put("METHOD",otherInbChannelUnitMappingDto.getFormPostingMethod());
+        map.put("QS",encData);
+        return map;
+    }
+
+
+
+    public HashMap<String, String> getForm_CBI(String encData, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) {
+        HashMap<String, String> map = new HashMap<>();
+        map.put("ACTION_URL", otherInbChannelUnitMappingDto.getBankUrl() + MODE + MODE_value + enc_data + encData + merchant_code + merchant_code_value + CBI_PID + PID_value);
+        map.put("METHOD", otherInbChannelUnitMappingDto.getFormPostingMethod());
+        return map;
+    }
+
+    //UBI Retail form posting template
+    public HashMap<String, String>  getForm_UBI(String encData, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) {
+        HashMap<String, String> map= new HashMap<>();
+        map.put("ACTION_URL",otherInbChannelUnitMappingDto.getBankUrl());
+        map.put("METHOD",otherInbChannelUnitMappingDto.getFormPostingMethod());
+        map.put("QS",encData);
+        map.put("PGID",transactionDto.getGatewayIssueMECode());
+        return map;
+    }
+
+
+    public HashMap<String, String> getForm_AXIS(String encData, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) {
+        HashMap<String, String> map = new HashMap<>();
+        map.put("ACTION_URL", otherInbChannelUnitMappingDto.getBankUrl()+encData_+encData);
+        map.put("METHOD", otherInbChannelUnitMappingDto.getFormPostingMethod());
+        map.put("data", encData);
+        map.put(AuthenticationFG_MENU_ID, AuthenticationFG_MENU_ID_value);
+        map.put(AuthenticationFG_CALL_MODE, AuthenticationFG_CALL_MODE_value);
+        map.put(CATEGORY_ID, CATEGORY_ID_value);
+        map.put(RU, RU_value);
+        map.put(QS, QS_value);
+
+        map.put("QS",encData);
+        return map;
+    }
+
+    public HashMap<String, String> getForm_Dhanlaxmi(String encData, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) {
+        HashMap<String, String> map = new HashMap<>();
+        map.put("ACTION_URL", otherInbChannelUnitMappingDto.getBankUrl() + MERCHANT_CODE + MERCHANT_CODE_VALUE + enc_data_Dhana +encData);
+        map.put("METHOD", otherInbChannelUnitMappingDto.getFormPostingMethod());
+        return map;
+
+    }
+
+    /****This Form posting added for Punjab and Sind Bank added by Shrikant***/
+    public HashMap<String, String>  getForm_PSB(String encData, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) {
+        HashMap<String, String> map= new HashMap<>();
+        map.put("ACTION_URL",otherInbChannelUnitMappingDto.getBankUrl());
+        map.put("METHOD",otherInbChannelUnitMappingDto.getFormPostingMethod());
+        map.put("data",encData);
+        map.put("BANK_ID",transactionDto.getGatewayIssueMECode());
+        return map;
+    }
+
+    //Bank of Maharashtra form
+    public HashMap<String, String>  getForm_BOM(String encData, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) {
+        HashMap<String, String> map= new HashMap<>();
+        map.put("ACTION_URL",otherInbChannelUnitMappingDto.getBankUrl());
+        map.put("METHOD",otherInbChannelUnitMappingDto.getFormPostingMethod());
+        map.put("PID",transactionDto.getGatewayIssueMECode());
+        map.put("BRN",transactionDto.getAtrnNum());
+        map.put("AMT", String.valueOf(transactionDto.getDebitAmt()));
+        map.put("RU","RU");
+        map.put("MODE",transactionDto.getPayMode());
+        map.put("NAR","ITC");
+        map.put("CURRENCY",transactionDto.getCurrencyCode());
+        map.put("TDATETIME", String.valueOf(transactionDto.getCreatedDate()));
+        return map;
+    }
+
+    /****This Form posting added for Canara Bank added by Shrikant***/
+    public HashMap<String, String>  getForm_Canara(String encData, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) {
+        HashMap<String, String> map= new HashMap<>();
+        map.put("ACTION_URL",otherInbChannelUnitMappingDto.getBankUrl());
+        map.put("METHOD",otherInbChannelUnitMappingDto.getFormPostingMethod());
+        map.put("data",encData);
+        map.put("BANK_ID",transactionDto.getGatewayIssueMECode());
+        return map;
+    }
+
+    //ESAF Retail form posting template
+    public HashMap<String, String>  getForm_ESAFRetail(String encData, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) {
+        HashMap<String, String> map= new HashMap<>();
+        map.put("ACTION_URL",otherInbChannelUnitMappingDto.getBankUrl());
+        map.put("METHOD",otherInbChannelUnitMappingDto.getFormPostingMethod());
+        map.put("mercode",transactionDto.getGatewayIssueMECode());
+        map.put("encData",encData);
+        return map;
+    }
+
+    public HashMap<String, String> getForm_ICICIRetail(String encData, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) {
+        HashMap<String, String> map = new HashMap<>();
+        map.put("ACTION_URL", otherInbChannelUnitMappingDto.getBankUrl());
+        map.put("METHOD", otherInbChannelUnitMappingDto.getFormPostingMethod());
+        map.put("SBMTTYPE",ICICI_SBMTTYPE);
+        map.put("MD",ICICI_MD);
+        map.put("ENC_DATA", encData);
+        map.put("PID", transactionDto.getMerchantId());
+        return map;
+
+    }
+
+}
+
+============================================================
+FILE 1: OtherInbFormPostingUtil.java
+============================================================
+package com.epay.otherinb.util.constants;
+
+/**
+ * Class Name:CardPaymentDao
+ * *
+ * Description: Card Payment Service
+ * *
+ * Author: VCE2645 - Siddhesh Nikam (Dev Lead SBIePAY)
+ * Copyright (c) 2026 [State Bank of India]
+ * All rights reserved
+ * *
+ * Version:1.0
+ */
+public class ErrorConstants {
+
+    private ErrorConstants() {}
+
+    public static final String GENERIC_ERROR_CODE = "4000";
+    public static final String GENERIC_ERROR_MESSAGE = "Failed In Processing {0} Service  ";
+
+    public static final String REQUIRED_ERROR_CODE = "4001";
+    public static final String REQUIRED_ERROR_MESSAGE = "{0} is required.";
+
+    public static final String INVALID_ERROR_CODE = "4002";
+    public static final String INVALID_ERROR_MESSAGE = "{0} is invalid. Reason: {1}.";
+
+    public static final String NOT_FOUND_ERROR_CODE = "4003";
+    public static final String NOT_FOUND_ERROR_MESSAGE = "{0} was not found.";
+
+    public static final String ALREADY_EXISTS_ERROR_CODE = "4004";
+    public static final String ALREADY_EXISTS_ERROR_MESSAGE = "{0} already exists.";
+
+    public static final String FAILED_TO_GENERATE_ERROR_CODE = "4005";
+    public static final String FAILED_TO_GENERATE_ERROR_MESSAGE = "Failed to generate {0}.";
+
+    public static final String UNCATEGORIZED_ERROR_CODE="4006";
+    public static final String UNCATEGORIZED_ERROR_MESSAGE="An unexpected error occurred while processing your request.";
+
+    public static final String MAX_LENGTH_ERROR_CODE = "4007";
+    public static final String MAX_LENGTH_ERROR_MESSAGE = "The maximum allowed length for {0} is {1}.";
+
+    public static final String INVALID_FORMAT_ERROR_CODE = "4008";
+    public static final String INVALID_FORMAT_ERROR_MESSAGE = "Invalid format for {0}. Expected format: {1}.";
+
+    public static final String EXCEEDED_MAX_LENGTH_ERROR_CODE = "4009";
+    public static final String EXCEEDED_MAX_LENGTH_ERROR_MESSAGE = "Invalid format or exceeded maximum length for {0}.";
+
+    public static final String TRAILING_SPACES_ERROR_CODE = "4010";
+    public static final String TRAILING_SPACES_ERROR_MESSAGE = "{0} contains leading or trailing spaces. Please provide a valid value.";
+
+    public static final String JSON_ERROR_CODE = "4011";
+    public static final String JSON_ERROR_MESSAGE = "Invalid JSON data provided in {0}.";
+
+    public static final String EXTERNAL_SERVICE_ERROR_CODE = "4012";
+    public static final String EXTERNAL_SERVICE_ERROR_MESSAGE = "{0} Service is Down. Please try again";
+
+    public static final String FIXED_FIELD_LENGTH_ERROR_CODE = "4013";
+    public static final String FIXED_FIELD_LENGTH_ERROR_MESSAGE = "The fixed length required for {0} is {1}.";
+
+    public static final String INVALID_ERROR_CODE_NO_REASON = "4014";
+    public static final String INVALID_ERROR_MESSAGE_NO_REASON = "{0} ''{1}'' is invalid.";
+
+    public static final String CARD_INITIATION_ERROR_CODE = "4015";
+    public static final String CARD_INITIATION_ERROR_MESSAGE = "The card authentication is failed.";
+
+    public static final String OTHER_INB_ERROR_CODE = "4016";
+    public static final String OTHER_INB_ERROR_MESSAGE = "The other inb initiation is failed.";
+
+    // Common error code for file generation...
+    public static final String FILE_GENERATION_ERROR_CODE = "4017";
+    public static final String FILE_GENERATION_ERROR_MESSAGE = "Error in {0} Generation, {1}.";
+
+    public static final String INVALID_ENUM_ERROR_CODE = "4018";
+    public static final String INVALID_ENUM_ERROR_MESSAGE = "{0} is invalid.";
+
+    /*Generic Payment Global Exception Handler Error Code/Message*/
+    public static final String PROCESS_SERVICE_ERROR_CODE = "4019";
+    public static final String PROCESS_SERVICE_ERROR_MESSAGE = "Failed In Processing {0} Service  ";
+
+    public static final String RBL_WEB_RESPONSE_ERROR_CODE = "4020";
+    public static final String RBL_WEB_RESPONSE_ERROR_MESSAGE= "Error While Decrypting Web Response";
+
+    public static final String WEB_CHECKSUM_ERROR_CODE = "4021";
+    public static final String WEB_CHECKSUM_MISMATCH_ERROR_MESSAGE = "Web Checksum Mismatched";
+    public static final String WEB_CHECKSUM_CREATION_ERROR_MESSAGE = "Error While Creating Web Request Checksum";
+
+    public static final String BOB_WEB_RESPONSE_ERROR_CODE = "4022";
+    public static final String BOB_WEB_RESPONSE_ERROR_MESSAGE= "Error While Decrypting Web Response";
+
+    public static final String BANK_REF_NO_ERROR_CODE = "4023";
+    public static final String BANK_REF_NO_ERROR_MESSAGE = "Invalid Bank Reference Number";
+
+    //for Central Bank
+    public static final String ENCRYPTION_ERROR_CODE = "3106";
+    public static final String ENCRYPTION_ERROR_MESSAGE = "Exception While Encrypting Web Request in ";
+
+    public static final String DOUBLE_VERIFICATION_ERROR_CODE = "3107";
+    public static final String DOUBLE_VERIFICATION_ERROR_MESSAGE = "Empty Double Verification Response";
+
+    public static final String CBI_WEB_RESPONSE_ERROR_CODE = "4020";
+    public static final String CBI_WEB_RESPONSE_ERROR_MESSAGE = "Error While Decrypting Web Response";
+
+    public static final String ENCDEC_ERROR_CODE = "4024";
+    public static final String WEB_REQUEST_ENCDEC_ERROR_MESSAGE= "Error While Encrypting Web Request";
+    public static final String WEB_RESPONSE_ENCDEC_ERROR_MESSAGE= "Error While Decrypting Web Request";
+
+
+    public static final String IndsInd_WEB_RESPONSE_ERROR_CODE = "4024";
+    public static final String IndsInd_WEB_RESPONSE_ERROR_MESSAGE= "Error While Decrypting Web Response";
+
+    public static final String AXIS_WEB_RESPONSE_ERROR_CODE = "4030";
+    public static final String AXIS_WEB_RESPONSE_ERROR_MESSAGE = "Error While Decrypting Web Response";
+
+    public static final String DHANALAXMI_WEB_RESPONSE_ERROR_CODE = "4031";
+    public static final String DHANALAXMI_WEB_RESPONSE_ERROR_MESSAGE = "Error While Decrypting Dhanalaxmi Web Response";
+
+    public static final String DHANALAXMI_DV_RESPONSE_PROCESS_ERROR_CODE = "4032";
+    public static final String DHANALAXMI_DV_RESPONSE_PROCESS_MESSAGE = "Dhanalaxmi DV response not processed";
+
+    public static final String KALUPUR_WEB_RESPONSE_MAP_ERROR_CODE="4033";
+    public static final String KALUPUR_WEB_RESPONSE_MAP_ERROR_MESSAGE=" Error While Decrypting Kalapur Web Response";
+
+    public static final String WEBRESPONSE_EMPTY_ERROR_CODE = "4001";
+    public static final String WEBRESPONSE_EMPTY_ERROR_MESSAGE = "Web Response is Null or Empty";
+
+    public static final String WEB_RESP_CHECKSUM_ERROR_CODE = "4002";
+    public static final String WEB_RESP_CHECKSUM_MISMATCH_ERROR_MESSAGE = "Web Response Checksum Mis-Matched";
+
+    public static final String WEB_RESP_CHECKSUM_CREATION_ERROR_CODE = "4003";
+    public static final String WEB_RESP_CHECKSUM_CREATION_ERROR_MESSAGE = "Web Resp Checksum Creation Failed";
+
+    public static final String WEB_REQ_CHECKSUM_CREATION_ERROR_CODE = "4004";
+    public static final String WEB_REQ_CHECKSUM_CREATION_ERROR_MESSAGE = "Web Req Checksum Creation Failed";
+
+    public static final String DV_REQ_CHECKSUM_CREATION_ERROR_CODE = "4005";
+    public static final String DV_REQ_CHECKSUM_CREATION_ERROR_MESSAGE = "DV Req Checksum Creation Failed";
+
+    public static final String WEB_REQRESP_AMT_MISMATCHED_ERROR_CODE = "4006";
+    public static final String WEB_REQRESP_AMT_MISMATCHED_ERROR_MESSAGE = "Web Req & Resp Txn Amount Mis-Matched";
+
+    public static final String WEB_RESP_DECRYPTION_ERROR_CODE = "4007";
+    public static final String WEB_RESP_DECRYPTION_ERROR_MESSAGE = "Error While Decrypting Web Response";
+
+    public static final String WEB_REQ_ENCRYPTION_ERROR_CODE = "4008";
+    public static final String WEB_REQ_ENCRYPTION_ERROR_MESSAGE = "Error While Encrypting Web Request";
+
+    public static final String FORM_POSTING_MAP_ERROR_CODE = "4009";
+    public static final String FORM_POSTING_MAP_ERROR_MESSAGE = "Error While Creating Form Posting Map";
+
+    public static final String CALCULATE_CHECKSUM_ERROR_CODE = "4010";
+    public static final String CALCULATE_CHECKSUM_ERROR_MESSAGE = "Error While Calculate Checksum";
+
+    public static final String ICICI_WEB_RESPONSE_ERROR_CODE = "4033";
+    public static final String ICICI_WEB_RESPONSE_ERROR_MESSAGE = "Error While Decrypting ICICI Web Response";
+
+    public static final String ICICI_DV_RESPONSE_PROCESS_ERROR_CODE = "4034";
+    public static final String ICICI_DV_RESPONSE_PROCESS_MESSAGE = "ICICI DV response not processed";
+
+}
+============================================================
+FILE 1: OtherInbConstants.java
+============================================================
+package com.epay.otherinb.util.constants;
+
+/**
+ * Class Name:PaymentConstants
+ * *
+ * Description: All Payment Constants
+ * *
+ * Author: VCE2645 - Siddhesh Nikam (Dev Lead SBIePAY)
+ * Copyright (c) 2026 [State Bank of India]
+ * All rights reserved
+ * *
+ * Version:1.0
+ */
+public class OtherInbConstants {
+    //BOM Constants
+    public static final String PATTERN_TILDA_CONST = "~";
+    public static final String BRN_CONST = "BRN";
+    public static final String AMT_CONST = "AMT";
+    public static final String MODE_CONST = "MODE";
+    public static final String NAR_CONST = "NAR";
+    public static final String TID_CONST = "TID";
+    public static final String STATUS_CONST = "STATUS";
+    public static final String TDATETIME_CONST = "TDATETIME";
+    public static final String CURRENCY_CONST = "CURRENCY";
+    public static final String SUCCESS_CONST = "Y";
+    public static final String FAILED_CONST = "F";
+    public static final String BOM_OINB_DV_REQUEST = "PID={0}&BRN={1}&AMT={2}&MODE=V&TID={3}";
+    public static final int STATUS_LENGTH = 25;
+    public static final int TID_LENGTH = 10;
+
+    public static final String OTHER_INB_INITIATION_TAG_VALUE = "OTHER INB PAYMENT INITIATION";
+    public static final String OTHER_INB_CALLBACK_TAG_VALUE = "OTHER INB PAYMENT CALLBACK";
+    public static final String NB_CONST = "NB";
+    public static final String ATRN = "atrn";
+    public static final String ATRN_NOT_FOUND = "Transaction status or atrn is not valid";
+    public static final String DEBIT_AMOUNT_CONST = "Debit Amount";
+    public static final String DEBIT_AMOUNT_GREATER_ZERO_CONST = "Amount needs to be greater than 0";
+    public static final String PAYMENT = "PAYMENT";
+    public static final String WEB_REQUEST_TYPE = "Web Request";
+    public static final String CREATED_BY_BOIR = "Bank Of India Retail";
+    public static final String ATRN_ARRN_REGEX_DIGIT = "^[a-zA-Z0-9]{20}$";
+    public static final int ATRN_LENGTH = 20;
+    public static final String INVALID_ATRN_CONST = "Invalid atrn Format";
+
+    public static final String INVALID_ERROR_CODE_NO_REASON = "2012";
+    public static final String INVALID_ERROR_MESSAGE_NO_REASON = "{0} ''{1}'' is invalid.";
+
+    public static final String CHECKSUM = "checkSum";
+    public static final String CHECKSUM_ERROR = "Invalid CheckSum";
+    public static final String MERCHANT_FINAL_RESPONSE= "?merchantFinalResponse=";
+    public static final String STANDARD_COMMON_MID = "0000001";
+    public static final String SPECIAL_CHAR_REGEX ="[-+^=!/]*";
+    public static final int RESPONSE_SUCCESS = 1;
+    public static final int RESPONSE_FAILURE = 0;
+    public static final String ZERO = "0";
+    public static final String SUCCESS_CAP="SUCCESS";
+    public static final String FAILED = "FAILED";
+    public static final String FAILED_FOR_AMOUNT_NOT_MATCHED = "Transaction failed due to order amount not matched.";
+    public static final String atrn = "atrn";
+    public static final int API_RESPONSE_STATUS_SUCCESS = 1;
+    public static final int API_RESPONSE_STATUS_FAIL = 0;
+
+    // IOB Constants //
+    public static final String ENCDATA_CONST = "encData";
+    public static final String ENCKEY = "encKey";
+    public static final String CHECKSUM_KEY = "checkSum";
+    public static final String UNAMEL = "uname";
+    public static final String TOKENEXPIRY = "tokenExpiry";
+    public static final String SERVICENAME = "servicename";
+    public static final String PWD = "pwd";
+    public static final String TOKEN = "token";
+
+    public static final String protocols = "TLSv1.2";
+    public static final String YES = "Y";
+    public static final String NO = "N";
+    public static final String ONB_SERVICE = "Other Inb Service";
+    public static final String REQUESTPROPERTY = "Content-Type";
+    public static final String ACCEPT_ACTION = "Accept";
+    public static final String APPLICATION_JSON = "application/json";
+    public static final String DATA_CONST = "data";
+    public static final String HMAC_CONST = "hmac";
+    public static final String ACTION = "action";
+    public static final String COMMA_CONST = "\\,";
+    public static final String EMPTY = "";
+
+    //********************************* BOB BANK START **********************************
+    public static final String ENC_DATA_KEY = "encdata";
+    public static final String PATTERN_SPACE = " ";
+    public static final String NEW_LINE_REGEX = "[\\r\\n]";
+    public static final String STATUS = "STATUS";
+    public static final String REFNO = "REFNO";
+    public static final String PRN = "PRN";
+    public static final String ITC = "ITC";
+    public static final String AMT = "AMT";
+    public static final String CRN = "CRN";
+    public static final String ACNT_NUM = "ACNT_NUM";
+    public static final String INB_PIPE_CONST = "\\|";
+    public static final String PATTERN_EQUAL_TO_CONST = "=";
+    public static final String NA = "NA";
+    public static final String NUMBER_DECIMAL_REGEX = "^(0|[1-9]\\d*)(\\.\\d+)?$";
+    public static final String AMOUNT_REGEX = "^(\\d{1,18}\\.\\d{1,2}|\\d{1,20})$";
+    public static final String INCORRECT_FORMAT = "Format is incorrect";
+    public static final String SUCCESS = "SUC";
+    public static final String FAILURE = "failure";
+    public static final String PENDING_CONST = "Pending";
+    public static final String FAILURE_CONST = "Failure";
+    public static final String INVALID_TXN_STATUS_FORMAT = "Invalid status format";
+    public static final String WEB_RESPONSE_TYPE = "Web Response";
+    public static final String CREATED_BY = "BOB Net Banking";
+    public static final String PIPE = "|";
+    public static final String BOB_NET_BANKING = "BOB NET BANKING RESPONSE";
+    public static final String PID = "PID";
+    public static final String PATTERN_PIPE_CONST = "|";
+    public static final String CHECKSUM_KEY_CAPS = "CHECKSUM";
+    public static final String PATTERN_EQUALTO_CONST = "=";
+    public static final String PATTERN_EMPTY = "";
+    //********************************* BOB BANK END **********************************
+
+    //********************************* RBL RETAIL BANK START **********************************
+    public static final String CREATED_BY_RBLR = "RBL Retail";
+    public static final String ENC_DATA_KEY_RBL= "encData";
+    public static final String RBL_RTL_SECRET_KEY="29304E8758327892";
+    public static final String ENC_DEC_ALGO="AES";
+    private static int keyLength = 256;
+    public static final String TRANDATE="TRANDATE";
+
+    public static final String CREATED_BY_RBL="RBL Retail";
+
+    public static final String WEB_REQ_BANKID= "BankId";
+    public static final String BNFID="BnfId";
+    public static final String REFERENCE_ID= "ReferenceId";
+    public static final String ACCOUNT_NO_CONST = "AccountNo";
+    public static final String PRN_CONST= "PRN";
+    public static final String TXNCURRENCY= "TxnCurrency";
+    public static final String TXNAMOUNT = "TxnAmount";
+    public static final String TXN_DATE_CONST = "TxnDate";
+    public static final String DOUBLE_VER_URL_KEY= "doubleVerification";
+    public static final String pmt_date_key= "pmt_date_key";
+    public static final String DATE_PATTERN_IB_CONST1= "yyyy-MM-dd";
+    public static final String TXNSTATUS = "TxnStatus";
+    public static final String REASON_UBI = "Reason";
+
+    public static final String DUPLICATE_FIELD = "Duplicate field ";
+    public static final String MISSING_FIELD = "Missing CdtrAcct/Othr/Id field ";
+    public static final String UNRECOGNIZED_FIELD = "Unrecognized field ";
+    public static final String INVALID_INPUT_FIELD = "Invalid input for field: ";
+    public static final String INVALID_INPUT = "Invalid input";
+    public static final String REQ_OBJECT = "Request object";
+    public static final String NEWLINE_REGEX = "\n";
+    public static final String REPLACE_REGEX = "\r\n";
+    public static final String SINGLE_QUOTE = "'";
+    //********************************* RBL RETAIL BANK END **********************************
+
+
+    //********************************* Central Bank of India Start **********************************
+    public static final String MODE = "?MODE=";
+    public static final String MODE_value = "P";
+    public static final String enc_data = "&encdata=";
+    public static final String merchant_code = "&merchant_code=" ;
+    public static final String merchant_code_value = "BILLPAY";
+    public static final String CBI_PID = "&PID=";
+    public static final String PID_value = "IB00014&" ;
+    public static final String PID1= "PID";
+    public static final String CREATED_BY_CBICORP= "CREATED_BY_CBICORP";
+
+    public static final String TID = "TID";
+    public static final String MODE1 = "MODE";
+    public static final String CBIOtherINB_MODE_CONST = "&MODE=V";
+    public static final String CBIOtherINB_ENC_DATA = "&encdata=";
+    public static final String CBIOtherINB_PID = "&pid=IB00014";
+    public static final String UTF_EIGHT = "UTF-8";
+    public static final String URL_ENCODED_CONTENT_TYPE = "application/x-www-form-urlencoded";
+    public static final String OTHER_INB_SERVICE = "Other INB";
+    public static final String SBI_INB_SERVICE = "SBI INB";
+
+    //********************************* Central Bank of India Start **********************************
+
+    //********************************* IndusInd RETAIL BANK START **********************************
+    public static final String PAID = "PAID";
+    public static final String BID = "BID";
+    public static final String CREATED_BY_INDSLR = "IndusInd Bank Retail";
+    //********************************* IndusInd RETAIL BANK END **********************************
+
+    public static final String GET_KEY = "get key";
+    public static final String GET_KEY_ERROR = "Error While fetching key";
+
+    //********************************** UBI RETAIL START ***********************************
+    public static final String UBI_ENC_DATA_KEY = "QS";
+
+
+    //********************************* Axis Retai Bank Start **********************************
+    public static final String AuthenticationFG_MENU_ID = "AuthenticationFG.MENU_ID";
+    public static final String AuthenticationFG_MENU_ID_value = "RAESHP";
+    public static final String AuthenticationFG_CALL_MODE = "AuthenticationFG.CALL_MODE";
+    public static final String AuthenticationFG_CALL_MODE_value = "2" ;
+    public static final String CATEGORY_ID = "CATEGORY_ID";
+    public static final String CATEGORY_ID_value = "NA";
+    public static final String RU = "RU";
+    public static final String RU_value = "NA";
+    public static final String QS = "QS";
+    public static final String QS_value = "NA";
+    public static final String encData_ = "?encdata=";
+    public static final String PATTERN_AMPERSAND_CONST = "&";
+    //********************************* Axis Retai Bank End **********************************
+
+    //********************************* SARASWAT RETAIL AND CORP BANK START **********************************
+    public static final String CheckSumFlag = "Y";
+    public static final String SHOP_MALL_PID_KEY = "ShoppingMallTranFG.PID";
+    public static final String SHOP_MALL_PRN_KEY = "ShoppingMallTranFG.PRN";
+    public static final String SHOP_MALL_ITC_KEY = "ShoppingMallTranFG.ITC";
+    public static final String SHOP_MALL_TRAN_CRN_KEY = "ShoppingMallTranFG.TRAN_CRN";
+    public static final String SHOP_MALL_TRAN_AMT_KEY = "ShoppingMallTranFG.TXN_AMT";
+    public static final String ShoppingMallTranFG_CHECK_SUM = "ShoppingMallTranFG.CHECK_SUM";
+    public static final String PID_CONST = "PID";
+    public static final String ITC_CAP_KEY = "ITC";
+    public static final String SHOP_MALL_CATEGORY_ID_KEY = "ShoppingMallTranFG.CATEGORY_ID";
+    public static final String SARASWAT_WEB_CONST = "FORMSGROUP_ID__=AuthenticationFG&__START_TRAN_FLAG__=Y&FG_BUTTONS__=LOAD&ACTION.LOAD=Y&AuthenticationFG.LOGIN_FLAG=1&BANK_ID=01&LANG_ID=001&AuthenticationFG.MENU_ID=CIMSHP&AuthenticationFG.CALL_MODE=2&Action.ShoppingMall.Verify.Init=Y&";
+    public static final String RU_CONST = "RU";
+    public static final String CATEGORY_ID_CONST = "CATEGORY_ID";
+    public static final String AMOUNT = "amount";
+    public static final String INVALID_TXN_AMT_FORMAT = "Invalid transactionAmount format";
+    public static final String FAIL_CONST = "FAIL";
+    public static final String BNF_ID = "BNF_ID";
+    public static final String MD_KEY = "MD";
+    public static final String REQ_USER_TYPE_KEY = "UserType";
+    public static final String USER_LANG_ID_KEY = "USER_LANG_ID";
+    public static final String BANKID = "BANK_ID";
+    public static final String MDV_KEY = "MDV";
+    public static final String USER_TYPE_KEY = "USER_TYPE";
+    public static final String CHECK_SUM_CAP_CONST = "CHECK_SUM";
+    public static final String TXN_RESP_BEAN_KEY = "txnRespBean";
+    public static final String TXN_RESP_DATA_KEY = "mapTxnResponseData";
+    public static final String POST_DATA_KEY = "gtwpostdata";
+    public static final String VER_ENCRYPTION_KEY_CONST = "VERENCKEY";
+    public static final String DV_REQUEST_TYPE = "DV Request";
+    public static final String DV_RESPONSE_TYPE = "DV Response";
+    public static final String OTHER_INB_CALLBACK = "aggregatorId={0}&queryRequest={1}&merchantId={2}";
+    public static final String SBIEPAY = "SBIEPAY";
+    public static final String OTHER_INB_SPLIT_PARAMETERS = "[|,^]";
+    public static final String SARASWATINB_PID = "&pid=IB000";
+
+    //********************************* Dhanalaxmi Retai Bank Start **********************************
+
+
+    public static final String DHANALAXMI_STATUS_SUCCESS_CONST="Y";
+    public static final String DHANALAXMI_BANKING_RESPONSE = "DHANALAXMI BANKING RESPONSE";
+    public static final String CREATED_BY_DHANALAXMI = "DHANALAXMI BANK";
+    public static final String DHANALAXMI_CONST = "DHANALAXMI";
+    public static final String DHANALAXMI_WEB_CHECKSUM="{0}|{1}|{2}|{3}|{4}";
+    public static final String DHANALAXMI_MERCH_CODE_CONST_URL = "?mid=";
+    public static final String DHANALAXMI_ENC_DATA = "&encdata=";
+    public static final String SBI_DHANALAXMI_SERVICE = "Dhanalaxmi Bank";
+    public static final String MERCHANT_CODE = "?mercode=";
+    public static final String MERCHANT_CODE_VALUE = "PGREFID";
+    public static final String enc_data_Dhana = "&encDhanBankData=";
+    public static final String SOUTHINB_PID = "&pid=IB000";
+
+
+    //********************************* Dhanalaxmi Retai Bank End **********************************
+
+    /******************************** Start Punjab and Sind Bank Retail&Corp Bank ****************/
+    public static final String BANK_ID="023";
+    public static final String PSB_BANK_ID="&bankId=023";
+    public static final String APP_TYPE="RetailCorp";
+    public static final String MERCHANT_NAME="MerchantName";
+    public static final String PARAM_BANK_ID="bankId";
+    public static final String PARAM_APP_TYPE="appType";
+    public static final String PG_REF="pgRef";
+    public static final String BANK_REF_NO="BankRefNo";
+    public static final String PARAM_AMOUNT="amt";
+    public static final String ACCOUNT_NO="accNo";
+    public static final String PARAM_PAID="PAID";
+    public static final String PARAM_CHECKSUM="checksum";
+    public static final String PAID_SUCCESS="Y";
+    public static final String SUCCESS_RESPONSE="SUCCESS";
+    public static final String FAILED_RESPONSE="FAILED";
+    public static final String PENDING="PENDING";
+    public static final String PSBOtherINB_MODE_CONST = "&MODE=V";
+    public static final String PSBOtherINB_ENC_DATA = "&encdata=";
+    public static final String CanaraOtherINB_MODE_CONST = "&MODE=V";
+    public static final String CanaraOtherINB_ENC_DATA = "&encdata=";
+    public static final String CANARA_BANK_REF_NO="&bankRefNo=372718082012475";
+    /******************************** Ended Punjab and Sind Bank Retail&Corp Bank****************/
+
+
+    //********************************* YES CORP BANK START **********************************
+    public static final String SHA_256 = "SHA-256";
+    public static final int AES_GCM_KEY_BYTES = 32;
+    public static final int GCM_TAG_LENGTH_BITS = 128;
+    public static final String CREATED_BY_YES_BANK_CORP = "YES BANK CORPORATE";
+    public static final String BANKURL = "BANKURL";
+    public static final String encdata = "encdata";
+    public static final String SUCCESS_STATUS = "S";
+    public static final String PENDING_STATUS = "P";
+    public static final String FAIL = "F";
+    //********************************* YES CORP BANK START **********************************
+
+    //********************************* HDFC RETAIL BANK START ***********************************
+    public static final String HDFC_Retail_INITIATION_TAG_VALUE = "HDFC RETAIL PAYMENT INITIATION";
+    public static final String HDFC_RETAIL_WEB_REQUEST="ClientCode={0}|MerchantCode={1}|TxnCurrency={2}|TxnAmount={3}|TxnScAmount={4}|MerchantRefNo={5}|SuccessStaticFlag={6}|FailureStaticFlag={7}|Date={8}|DynamicUrl={9}|CheckSum={10}";
+    public static final String CREATED_BY_HDFC_RETAIL = "HDFC RETAIL BANK";
+    public static final String CREATED_BY_HDFC_RETAIL_BANK = "HDFC Retail Bank";
+    public static final String X509 = "X.509";
+    public static final String BEGIN_PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----";
+    public static final String END_PUBLIC_KEY = "-----END PUBLIC KEY-----";
+    public static final String AES_GCM_NoPadding = "AES/GCM/NoPadding";
+    public static final String HmacSHA256 = "HmacSHA256";
+    public static final String AES = "AES";
+    public static final String CREATED_BY_HDFCRETAIL = "CREATED_BY_HDFCRETAIL";
+    public static final String HDFC_RETAIL_WEB_RESPONSE = "HDFC RETAIL WEB RESPONSE";
+
+    //********************************* HDFC RETAIL BANK END *************************************
+
+    //********************************* HDFC CORP BANK START *************************************
+    public static final String CREATED_BY_HDFC_CORP = "HDFC CORPORATE BANK";
+    public static final String ClientCode = "ClientCode";
+    public static final String MerchantCode = "MerchantCode";
+    public static final String TxnCurrency = "TxnCurrency";
+    public static final String TxnAmount = "TxnAmount";
+    public static final String TxnScAmount = "TxnScAmount";
+    public static final String MerchantRefNo = "MerchantRefNo";
+    public static final String SuccessStaticFlag = "SuccessStaticFlag";
+    public static final String FailureStaticFlag = "FailureStaticFlag";
+    public static final String Date = "Date";
+    public static final String DynamicUrl = "DynamicUrl";
+    public static final String CheckSum = "CheckSum";
+    public static final String BankRefNo = "BankRefNo";
+    public static final String BankAckCode = "BankAckCode";
+    public static final String BackAckMsg = "BackAckMsg";
+    public static final String APPID = "APPID";
+    public static final String PendingStatusCode = "105";
+    public static final String Pending = "Pending";
+    public static final String SuccessStatusCode = "102";
+    public static final String Success = "Success";
+    public static final String METHOD = "METHOD";
+
+    //********************************* HDFC CORP BANK END **************************************
+
+    //********************************* BANDHAN CORP BANK START **********************************
+    public static final String TXN_DATETIME_FORMAT = "dd/MM/YYYY HH:mm:ss";
+    public static final String TXN_DATETIME_FORMAT1 = "dd/MM/yyyy%20HH:mm:ss";
+    public static final String CREATED_BY_BANDHAN_CORP = "BANDHAN CORPORATE BANK";
+    public static final String mercode = "mercode";
+    public static final String encData = "encData";
+    public static final String openCurl = "{";
+    public static final String closeCurl = "}";
+    public static final String Bandhan_mercode = "SBIPG001";
+    //********************************* BANDHAN CORP BANK END **********************************
+    public static final String AES_KEY="vgdai3wlncw&baii";
+
+    ///kalupur Bank
+
+    public static final String KALUPUR_CHECKSUM = "checkval";
+    public static final String KALUPUR_NAR = "NAR";
+    public static final String KALUPUR_SUCCESS = "Y";
+    public static final String KALUPUR_DVR_STATUS = "V";
+    public static final String KALUPUR_PIPE_SEP = "|";
+    public static final String KALUPUR_SBIEPAY = "SBIEPAY";
+    public static final String KALUPUR_INR = "INR";
+
+
+    //********************************* ESAF Bank Start **********************************
+    public static final String UNQID = "unqId";
+    public static final String ENCRYPTION = "encryption";
+    public static final String ENCRYPTION_ERROR = "Error While Encrypting Request";
+    public static final String ENCRYPT_KEY = "key";
+    public static final String DECRYPTION = "decryption";
+    public static final String DECRYPTION_ERROR = "Error While Decrypting Request";
+    public static final String RES = "Response";
+    public static final String PIPE_SPLIT = "\\|";
+    public static final String OTHER_INB_PLAIN_DV_CALLBACK = "{0}|{1}|{2}";
+    public static final String OTHER_INB_DV_CALLBACK = "{0}|{1}|{2}|{3}";
+    public static final String OTHER_INB_DV_REQDATA_CALLBACK="{0}|{1}|{2}|{3}|{4}";
+    public static final String CHECKSUM_MISMATCH = "Check sum Mismatch";
+    //********************************* ESAF Bank End **********************************
+
+
+    //********************************* ICICI Bank Start **********************************
+
+    public static final String ICICI_STATUS_SUCCESS_CONST="Y";
+    public static final String ICICI_CONST = "ICICI";
+    public static final String ICICI_MERCH_CODE_CONST_URL = "?mid=";
+    public static final String ICICI_ENC_DATA = "&encdata=";
+    public static final String CREATED_BY_ICICI = "ICICI BANK";
+    public static final String ICICI_SBMTTYPE = "POST";
+    public static final String ICICI_MD= "P";
+    public static final String ICICI_SPID = "100000000004";
+
+
+
+    //********************************* ICICI Bank End **********************************
+
+}
+
+============================================================
+FILE 1: ICICIPaymentWebClientService.java
+============================================================
+package com.epay.otherinb.externalservice;
+
+import com.epay.otherinb.config.OtherInbConfigDetails;
+import com.epay.otherinb.exceptions.OtherInbPaymentException;
+import com.epay.otherinb.util.constants.ErrorConstants;
+import com.epay.otherinb.util.constants.OtherInbConstants;
+import com.epay.otherinb.util.encryptdecryptutil.ICICIRetailEncryptionDecryptionUtil;
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Mono;
+import reactor.util.retry.Retry;
+
+import java.text.MessageFormat;
+import java.time.Duration;
+import java.util.Optional;
+import java.util.function.Supplier;
+
+@RequiredArgsConstructor
+@Component
+public class ICICIPaymentWebClientService {
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+    private final OtherInbConfigDetails otherInbConfigDetails;
+    private final ICICIRetailEncryptionDecryptionUtil iciciRetailEncryptionDecryptionUtil;
+
+    public String processingDoubleVerRequest(String plainDVRequest) {
+        try {
+            String encryptedDVData = iciciRetailEncryptionDecryptionUtil.iciciEncrypt(plainDVRequest);
+            logger.info("Payment Callback Encrypted and Encoded Double Verification {} " + encryptedDVData);
+            String DVResponse = Optional.ofNullable(ICICIDVResponseConn(otherInbConfigDetails.getMerchantResponseView(), (OtherInbConstants.ICICI_MERCH_CODE_CONST_URL).concat("mid").concat(OtherInbConstants.ICICI_ENC_DATA).concat(encryptedDVData))).filter(x -> !x.isEmpty()).orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.DOUBLE_VERIFICATION_ERROR_CODE, ErrorConstants.DOUBLE_VERIFICATION_ERROR_MESSAGE));
+            logger.info("Payment Callback Encrypted Double Verification Response {} ", DVResponse);
+            return DVResponse;
+        } catch (Exception e) {
+            logger.error("Exception While processingDoubleVerRequest  {}", e);
+            throw new OtherInbPaymentException(ErrorConstants.DOUBLE_VERIFICATION_ERROR_CODE, ErrorConstants.DOUBLE_VERIFICATION_ERROR_MESSAGE);
+        }
+    }
+
+    public String ICICIDVResponseConn(String bankdvurl, String encryptedData) {
+        logger.info("Other INB DV Request posting parameters DV Url {} and encryptedData {} ", bankdvurl + encryptedData);
+        LoggerUtility logger = LoggerFactoryUtility.getLogger(ICICIPaymentWebClientService.class);
+        logger.info("Other INB DV Request posting parameters DV Url {} and encryptedData {} ", bankdvurl, encryptedData);
+        try {
+            WebClient webClient = WebClient.builder().baseUrl(bankdvurl).build();
+            logger.info("webClient URL for other INB {} ", webClient);
+
+            return webClient.post().header(OtherInbConstants.REQUESTPROPERTY, OtherInbConstants.URL_ENCODED_CONTENT_TYPE).bodyValue(encryptedData).retrieve().onStatus(status -> {
+                logger.info("DV Response received status for other INB {} ", status);
+                return !status.is2xxSuccessful();
+            }, clientResponse -> clientResponse.bodyToMono(String.class).flatMap(errorBody -> Mono.error(((Supplier<RuntimeException>) () -> new OtherInbPaymentException(ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE, MessageFormat.format(ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE, OtherInbConstants.SBI_INB_SERVICE))).get()))).bodyToMono(String.class).doOnNext(body -> {
+                logger.info("responseCode for other INB {} ", body);
+            }).doOnError(error -> {
+                logger.info("error responseCode for other INB {} ", error);
+            }).onErrorResume(error -> {
+                logger.info("error responseCode for other INB {} ", error);
+                return Mono.error(() -> new OtherInbPaymentException(ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE, MessageFormat.format(ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE, OtherInbConstants.OTHER_INB_SERVICE)));
+            }).retryWhen(Retry.fixedDelay(3, Duration.ofSeconds(1)).filter(throwable -> throwable instanceof OtherInbPaymentException).doBeforeRetry(retrySignal -> logger.info("Retrying attempt {} due to error: {}", retrySignal.totalRetries() + 1, retrySignal.failure().getMessage()))).block();
+        } catch (Exception e) {
+            logger.error("Exception While otherINBDVResponseConn  {}", e);
+            throw new OtherInbPaymentException(ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE, MessageFormat.format(ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE, OtherInbConstants.OTHER_INB_SERVICE));
+        }
+    }
+}
+
+============================================================
+FILE 1: OtherINBPaymentInitiationController.java
+============================================================
+package com.epay.otherinb.controller;
+
+import com.epay.otherinb.entity.OtherInbPostingData;
+import com.epay.otherinb.model.request.PaymentRequest;
+import com.epay.otherinb.model.response.PaymentResponse;
+import com.epay.otherinb.service.OtherInbPaymentService;
+import com.epay.otherinb.util.constants.OtherInbConstants;
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.*;
+
+/**
+ * Class Name:OtherINBPaymentInitiationController
+ * *
+ * Description: All Payment Constants
+ * *
+ * Author: VCE2645 - Siddhesh Nikam (Dev Lead SBIePAY)
+ * Copyright (c) 2026 [State Bank of India]
+ * All rights reserved
+ * *
+ * Version:1.0
+ */
+
+@RestController
+@RequiredArgsConstructor
+@Validated
+@Tag(name = OtherInbConstants.OTHER_INB_INITIATION_TAG_VALUE)
+@RequestMapping("/other-inb/sbi")
+public class OtherINBPaymentInitiationController {
+
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+    public final OtherInbPaymentService otherInbPaymentService;
+
+    @PostMapping("/initiate")
+    @Operation(summary = "Other INB Bank channel transaction initiation api",description = "This API is used for Other Bank transactions initiations.")
+    public PaymentResponse<OtherInbPostingData> otherInbInitiateWebRequest(@Valid @RequestBody PaymentRequest paymentRequest) {
+        logger.info("Other INB Payment initiation controller start {} ", paymentRequest.getAtrn());
+        return otherInbPaymentService.generateReqPayload(paymentRequest);
+    }
+}
+============================================================
+FILE 1: OtherINBPaymentCallBackController.java
+============================================================
+package com.epay.otherinb.controller;
+
+import com.epay.otherinb.dto.IobCallbackRequest;
+import com.epay.otherinb.dto.TransactionDto;
+import com.epay.otherinb.entity.OtherInbPostingData;
+import com.epay.otherinb.model.request.PSBRetailCorpRequest;
+import com.epay.otherinb.model.request.PaymentRequest;
+import com.epay.otherinb.model.response.PaymentFinalResponse;
+import com.epay.otherinb.model.response.PaymentResponse;
+import com.epay.otherinb.service.*;
+import com.epay.otherinb.util.constants.OtherInbConstants;
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import lombok.SneakyThrows;
+import org.springframework.http.ResponseEntity;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.view.RedirectView;
+
+/**
+ * Class Name:OtherINBPaymentCallBackController
+ * *
+ * Description: All Payment Constants
+ * *
+ * Author: VCE2645 - Siddhesh Nikam (Dev Lead SBIePAY)
+ * Copyright (c) 2026 [State Bank of India]
+ * All rights reserved
+ * *
+ * Version:1.0
+ */
+
+@RestController
+@RequiredArgsConstructor
+@Validated
+@Tag(name = OtherInbConstants.OTHER_INB_INITIATION_TAG_VALUE)
+@RequestMapping("/other-inb")
+public class OtherINBPaymentCallBackController {
+
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+    public final OtherInbPaymentService otherInbPaymentService;
+    private final IOBRetailPaymentService iobRetailPaymentService;
+    public final IndusIndRetailPaymentService indusIndRetailPaymentService;
+    public final BomRetailPaymentService bomRetailPaymentService;
+
+    public final UBIRetailPaymentService ubiRetailPaymentService;
+    private final RBLRetailPaymentService rblRetailPaymentService;
+    public final BOBRetailPaymentService bobRetailPaymentService;
+    public final ICICIRetailPaymentService iciciRetailPaymentService;
+    public final AxisRetailPaymentService axisRetailPaymentService;
+    public final CBIRetailPaymentService cbiRetailPaymentService;
+    public final SaraswatRetailPaymentService saraswatRetailPaymentService;
+    public final DhanalaxmiPaymentService dhanalaxmiPaymentService;
+    public final ESAFOtherInbPaymentService esafOtherInbPaymentService;
+    public final SIBPaymentService sibPaymentService;
+    private final PSBRetailCorpService psbRetailCorpService;
+    private final CanaraRetailCorpService canaraRetailCorpService;
+
+
+    @SneakyThrows
+    @PostMapping("/callback/boi/retail")
+    public PaymentResponse<OtherInbPostingData> otherInbInitiateWebRequest(@Valid @RequestBody PaymentRequest paymentRequest) {
+        logger.info("Other INB Payment initiation controller start {} ", paymentRequest.getAtrn());
+        return otherInbPaymentService.generateReqPayload(paymentRequest);
+    }
+
+    @PostMapping("/callback/iob/retail")
+    public RedirectView otherInbIndusIobCallbackWebResponse(@RequestParam(OtherInbConstants.ENC_DATA_KEY) String webResponse) throws Exception {
+        logger.info("IOB OTHER INB Payment callback controller start {} ", webResponse);
+        return iobRetailPaymentService.processIOBResponsePayload(webResponse);
+    }
+
+    @SneakyThrows
+    @PostMapping("/callback/indusind/retail")
+    public RedirectView otherInbIndusIndCallbackWebResponse(@RequestParam(OtherInbConstants.ENC_DATA_KEY) String webResponse) {
+        logger.info("IndusInd OTHER INB Payment callback controller start {} ", webResponse);
+        return indusIndRetailPaymentService.processWebResponsePayload(webResponse);
+    }
+
+
+
+    @SneakyThrows
+    @PostMapping("/callback/ubi/retail")
+    public ResponseEntity<?> ubiCallBackWebRequest(@RequestParam(OtherInbConstants.UBI_ENC_DATA_KEY) String webResponse) {
+        logger.info("Other INB UBI call back controller start {} ", webResponse);
+        return ubiRetailPaymentService.processUBICallBack(webResponse);
+    }
+
+    @SneakyThrows
+    @PostMapping("/callback/rbl/retail")
+    public RedirectView otherInbRblCallbackWebResponse(@RequestParam(OtherInbConstants.ENC_DATA_KEY) String webResponse) {
+        logger.info("Other INB Payment initiation controller start {} ", webResponse);
+        return rblRetailPaymentService.processWebResponsePayload(webResponse);
+    }
+
+    @SneakyThrows
+    @PostMapping("/callback/bob/retailcorp")
+    public RedirectView otherInbBobCallbackWebResponse(@RequestParam(OtherInbConstants.ENC_DATA_KEY) String webResponse) {
+        logger.info("BOB OTHER INB Payment callback controller start {} ", webResponse);
+        return bobRetailPaymentService.processWebResponsePayload(webResponse);
+    }
+    @SneakyThrows
+    @PostMapping("/callback/icici/retail")
+    @Operation(summary = "ICICI Other INB Web Response and Double Verification API", description = "This API is used for Capture Web Response and Double Verification call to Bank.")
+    public PaymentFinalResponse iciciCallBackWebRequest(@RequestParam(OtherInbConstants.ENC_DATA_KEY) String webResponse) throws Exception {
+        logger.info("Other INB icici call back controller start {} ", webResponse);
+        return iciciRetailPaymentService.processICICICallBack(webResponse);
+    }
+    @PostMapping(value = "/callback/axis")
+    @Operation(summary = "AXIS OTHER INB Web Response and Double Verification API", description = "This API is used for Capture Web Response and Double Verification call to Bank.")
+    public PaymentFinalResponse sbiNbWebResponse(@RequestParam(OtherInbConstants.ENC_DATA_KEY) String webResponse) throws Exception {
+        logger.info("SBI INB Payment callback controller start {} ", webResponse);
+        return axisRetailPaymentService.processAXISOtherInbCallBack(webResponse);
+    }
+
+    @PostMapping(value = "/callback/cbi")
+    @Operation(summary = "CBI Other INB Web Response and Double Verification API", description = "This API is used for Capture Web Response and Double Verification call to Bank.")
+    public PaymentFinalResponse cbiOINbWebResponse(@RequestParam(OtherInbConstants.ENC_DATA_KEY) String webResponse) throws Exception {
+        logger.info("CBI Other INB Payment callback controller start {} ", webResponse);
+        return cbiRetailPaymentService.processCBIInbCallBack(webResponse);
+    }
+
+    @PostMapping(value = "/callback/saraswat")
+    @Operation(summary = "SARASWAT Other INB Web Response and Double Verification API", description = "This API is used for Capture Web Response and Double Verification call to Bank.")
+    public PaymentFinalResponse sarOINbWebResponse(@RequestParam(OtherInbConstants.ENC_DATA_KEY) String webResponse, TransactionDto dto ) throws Exception {
+        logger.info("SARASWAT Other INB Payment callback controller start {} ", webResponse);
+        return saraswatRetailPaymentService.processSARASWATOtherInbCallBack(webResponse,dto);
+    }
+
+    @PostMapping(value = "/callback/sib")
+    @Operation(summary = "SOI Other INB Web Response and Double Verification API", description = "This API is used for Capture Web Response and Double Verification call to Bank.")
+    public PaymentFinalResponse soiOINbWebResponse(@RequestParam(OtherInbConstants.ENC_DATA_KEY) String webResponse,TransactionDto dto) throws Exception {
+        logger.info("SOI Other INB Payment callback controller start {} ", webResponse);
+        return sibPaymentService.processSOIInbCallBack(webResponse,dto );
+    }
+    @PostMapping(value = "/callback/dhanalaxmi")
+    @Operation(summary = "Dhanalaxmi Other INB Web Response and Double Verification API", description = "This API is used for Capture Web Response and Double Verification call to Bank.")
+    public PaymentFinalResponse dhanalaxmiOINbWebResponse(@RequestParam(OtherInbConstants.ENC_DATA_KEY) String webResponse) throws Exception {
+        logger.info("Dhanalaxmi Other INB Payment callback controller start {} ", webResponse);
+        return dhanalaxmiPaymentService.processDhanalaxmiCallBack(webResponse);
+    }
+    @PostMapping(value="/callback/psb")
+    public ResponseEntity<String> psbCallback(@RequestBody PSBRetailCorpRequest request,TransactionDto transactionDto) throws Exception{
+        logger.info("Punjab and Sind Bank INB Payment callback controller start {} ", request);
+           psbRetailCorpService.processPSBCallback(request,transactionDto);
+            return ResponseEntity.ok("success");
+    }
+
+    @SneakyThrows
+    @PostMapping("/callback/bom/retail")
+    public RedirectView otherInbBomCallbackWebResponse(@RequestParam(OtherInbConstants.ENC_DATA_KEY) String webResponse) {
+        logger.info("IndusInd OTHER INB Payment callback controller start {} ", webResponse);
+        return bomRetailPaymentService.processWebResponsePayload(webResponse);
+    }
+
+    @PostMapping(value = "/callback/canara")
+    public PaymentFinalResponse canaraBankCallback(@RequestParam(OtherInbConstants.ENC_DATA_KEY) String webResponse,TransactionDto transactionDto) throws Exception{
+        logger.info("Canara Bank INB Payment callback controller started {} ", webResponse);
+        return canaraRetailCorpService.processCanaraCallback(webResponse,transactionDto);
+    }
+
+    /**
+     * @return -JSON : PaymentResponse<PostingData> (1.postURL, 2.merchIdVal, 3.EncryptTrans, 4.EncryptpaymentDetails, 5.atrn)
+     * @apiName: Initiate ESAF Other INB Web Request
+     * @apiUrl: /callback/esaf
+     * @Method: Post
+     * @Exception: or @Error : Payment is not found.
+     * @consumes: MediaType.APPLICATION_JSON_VALUE,
+     * @produces: @produces- MediaType.APPLICATION_JSON_VALUE
+     */
+    @PostMapping("/callback/esaf")
+    @Operation(summary = "Other INB ESAF Bank Web Request API",description = "This API is used for Post Payment Request to Bank.")
+    public RedirectView otherInbESAFInitiateWebResponse(@Valid @RequestParam(OtherInbConstants.ENCDATA_CONST) String encData, @RequestParam("merchIdVal") String merchIdVal) throws Exception {
+        logger.info("ESAF Other INB Payment initiation controller start {} ", encData,merchIdVal);
+        return esafOtherInbPaymentService.processReqPayloadESAF(encData,merchIdVal);
+    }
+
+}
+
+============================================================
+FILE 1: OtherInbConfigDetails.java
+============================================================
+package com.epay.otherinb.config;
+
+import lombok.Data;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Configuration;
+
+/**
+ * Class Name:OtherInbConfig
+ * *
+ * Description:
+ * *
+ * Author:VCE2645(Siddhesh Nikam)
+ * <p>
+ * Copyright (c) 2024 [State Bank of India]
+ * All right reserved
+ * *
+ * Version:1.0
+ */
+
+@Data
+@Configuration
+public class OtherInbConfigDetails {
+
+    @Value("${https_protocols}")
+    private String https_protocols;
+
+    @Value("${https_proxySet}")
+    private String https_proxySet;
+
+    @Value("${https_proxyHost}")
+    private String https_proxyHost;
+
+    @Value("${https_proxyPort}")
+    private String https_proxyPort;
+
+    @Value("${wibmo.proxy.required}")
+    private String proxyRequired;
+
+    @Value("${security.cors.origin}")
+    private String corsOrigin;
+
+    @Value("${external.api.ui.service.redirectView}")
+    private String merchantResponseView;
+
+    @Value("${key.aek}")
+    private String aek;
+
+    @Value("${external.api.ui.service.redirectView}")
+    private String CbiOINBurl;
+
+    @Value("${external.api.ui.service.redirectView}")
+    private String AxisOINBurl;
+
+    @Value("${external.api.ui.service.redirectView}")
+    private String dhanalaxmiDvUrl;
+
+    @Value("${external.api.ui.service.redirectView}")
+    private String SaraswatOINBurl;
+
+    // ESAf
+    @Value("${epay.other.inb.esaf.tokenURL}")
+    private String esafTokenURL;
+
+    @Value("${epay.other.inb.esaf.dvURL}")
+    private String esafDVURL;
+
+    @Value("${external.api.ui.service.redirectView}")
+    private String PSBOINBurl;
+
+}
+
+============================================================
+FILE 1: TransactionDto.java
+============================================================
+package com.epay.otherinb.dto;
+
+import com.epay.otherinb.util.enums.*;
+import lombok.*;
+
+import java.io.Serializable;
+import java.math.BigDecimal;
+import java.util.Date;
+
+/**
+ * Class Name:CardPaymentDao
+ * *
+ * Description: Card Payment Service
+ * *
+ * Author: VCE2645 - Siddhesh Nikam (Dev Lead SBIePAY)
+ * Copyright (c) 2026 [State Bank of India]
+ * All rights reserved
+ * *
+ * Version:1.0
+ */
+@Setter
+@Getter
+@ToString
+@AllArgsConstructor
+@NoArgsConstructor
+@Builder(toBuilder = true)
+public class TransactionDto implements Serializable {
+
+    private String atrnNum;
+    private String merchantId;
+    /* Order Information */
+    private String orderRefNumber;
+    private String sbiOrderRefNumber;
+
+    /* Payment Information */
+    private String payMode;
+    private BigDecimal orderAmount;
+    private BigDecimal debitAmt;
+    private String channelBank;
+    private String cin;
+    private String pushResponse;
+    private String payProcId;
+    private String paymodeType;
+    private String gtwMapId;
+    private String gatewayIssueMECode;
+    private BigDecimal availableRefundAmount;
+    private BigDecimal chargeBackAmount;
+    private String bankReferenceNumber;
+    /* Transaction Information */
+    private String failReason;
+    /* Status Information */
+    private TransactionStatus transactionStatus;
+    private PaymentStatus paymentStatus;
+    private SettelmentStatus settlementStatus;
+    private RefundStatus refundStatus;
+    private CancellationStatus cancellationStatus;
+    private String chargeBackStatus;
+    /* Audit Information */
+    private String createdBy;
+    private String updatedBy;
+    private Long createdDate;
+    private Long updatedDate;
+    private String currencyCode;
+    private String gstin;
+    private Date paymentSuccessDate;
+}
