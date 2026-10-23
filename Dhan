@@ -1099,5 +1099,171 @@ public class DhanalaxmiPaymentWebClientService {
     }
 
 
+=============================================================================================
+Dhanalaxmi Document
+============================================================================================
+
+Dhanlaxmi Bank Payment Gateway (PG) Integration Document 
+
+
+
+I. Request parameters from merchant site to DhanBank 
+
+When a customer from merchant site selects Dhanlaxmi Bank’s payment gateway, the following parameters have to be sent to Bank’s web portal through secured protocol (https) via post method. In case of UAT, the protocol would be “http” via post method (below mentioned URLs are UAT, production URL will be shared at the time of production movement).
+
+Parameter Name	Parameter Desc	Mandatory Flag (Y/N)	Max Length	Remarks
+PID	Payment Identifier of the Merchant 	Y	20	PGREFID
+PRN	Payment Reference No from the Merchant Site	Y	30	Varchar2 data type 
+AMT	Payment Amount	Y	14,2	Number Field
+CRN	Currency Code	Y	3	Default Value INR
+RU	Return URL (To be Shared by K S E B)	Y		
+MN	Merchant Name	Y	50	
+ACTNO	Account Number related to the CIF number	N	30	
+
+
+Request parameters will be encrypted using AES.jar library and the encrypted value is assigned to ‘encDhanBankData’ variable. This ‘encDhanBankData’ will be sent to the bank using HTTPS POST method. 
+
+Along with this ‘encDhanBankData’ request parameter, merchant should send the “mercode” request parameter with value of “PGREFID” (value equal to PID in the above)
+
+The AES jar file and the key for encryption/decryption has to be shared by Dhanlaxmi Bank.
+
+a. Encryption Logic:
+
+String plainData = "PID= PGREFID&PRN=1001104000004343&AMT=10.50&CRN= INR&RU=<<Provide the URL>>"&MN=BSNLRecharge&ACTNO=1234567890";
+String encKey = "axaxaxa"; 
+
+String encData = AES256Bit.getEncryptedString (plainData, encKey);
+
+
+e.g. URL for Retail Internet Banking : 
+
+https://ngib.dhanbank.in:8443/ib-retail-web/tenant/pgLogin?mercode= PGREFID&encDhanBankData=H6t9sRk/Nw0NCLACvTem25Brjh4jtZJcRJYD4/hdS3j4FyvESNRyI8TDRwX7K13i/8xFDChq7oMfNuc/j35iCIONq1eeG+HZwfmhinNlISCruxHTGTkFSJcmZydYeTuc6o/+KeXXm6igDzqu6rQb4EuUqb9FrzMEAZodeqz+UXk=
+
+At Bank's end this data needs to be decrypted.
+
+Note:      1.) “mercode" is a non encrypted parameter.
+
+b. Decryption Logic:
+
+String encData = "H6t9sRk/Nw0NCLACvTem25Brjh4jtZJcRJYD4/hdS3j4FyvESNRyI8TDRwX7K13i/8xFDChq7oMfNuc/j35iCIONq1eeG+HZwfmhinNlISCruxHTGTkFSJcmZydYeTuc6o/+KeXXm6igDzqu6rQb4EuUqb9FrzMEAZodeqz+UXk=";
+String decKey = "axaxaxa“ ;// Same key for encryption
+String decData = AES256Bit.decrypt(encData, decKey);
+
+Important Note: 
+
+The parameters are passed using POST Method
+
+
+1.	 Response parameters posted back to merchant from Bank site 
+
+
+Parameter Name	Parameter Desc	Mandatory Flag (Y/N)	Max Length	Remarks
+PRN	PGREFID Unique Reference Number	Y	30	Varchar2
+BID	Bank Unique Reference Number
+	Y	25	Varchar2
+PAID	For Retail Banking
+
+Transaction Status ('Y' for Success and 'N' for Failure)
+	Y	1	Varchar2
+AMT	Transaction Amount	Y	14,2	Number
+
+
+Response parameters will be sent by the Bank Gateway to merchant Return URL in the encrypted format using above logic. merchant will decrypt the data and update the transaction status.
+
+String plainData = "PRN=1001104000004343&BID=123456&PAID=Y&AMT=10.50";
+String encKey = "axaxaxa“;
+String encData = AES256Bit.encrypt(plainData, encKey);
+
+e.g. URL: 
+<<Merchant URL>>? mercode= PGREFID&encDhanBankData =YLOdTeAHysFWoWcP1QLnbpJ78gRgyxEVtTXcg+3leIP8ja0rERxWcYG9MQabMd3N
+
+Along with this ‘encDhanBankData’ response parameter, Bank would send the “mercode” request parameter with value of “PGREFID” (value equal to PID in the above)
+
+Double Verification
+
+
+a.	Request parameters from Merchant site to Dhanlaxmi Bank 
+
+The double verification call will be a server to server (S2S) call. This call to be invoked as  json( API) request and response. The encryption logic should be AES256.  For the better data integrity along with the encryption there will a checksum value to be validated. The checksum logic file will be shared separately.
+
+
+JSON API Endpoint URL :-     https://ngib.dhanbank.in:8443/rib-rest/payment/paymentDoubleVerification
+
+
+Merchant to bank 
+
+Parameter Name	Parameter Desc	Mandatory Flag (Y/N)	Max Length	Remarks
+PRN	PG  Unique Reference Number	         Y	30	Varchar2
+AMT	Transaction amount	          Y	14,2	
+
+Checksum Input Plain String  : PRN=885295877&AMT=43.36
+
+Plain String for Request Encryption :- 
+
+PRN=885295877&AMT=43.36&CHECKSUM=26f8d03b43ac7fee0ebc25446bd97be071fde18dd8ba8dd21ca0c6d0a28e2a3d
+
+
+JSON Post Body for dual verification :-
+
+Request
+
+    {
+        "merchantID": " PGREFID",
+        "encDhanBankData":"C3F48FA2B04C6246290E0A3FCA589436790761C9505BAF4B47DE31E5CFD1D63C03FD4B0EACA3C76C3E50FA246DFBD49A05FF41DFC0842E63201A34DC94547F5A40585E56D42E08BA8D4304C7DCCF1DE4CA1CDFE514156722679937E4579A091E81A3CD871EC1A14581D55B362A6C9755"
+    }
+    
+b. Response parameters from Dhanlaxmi Bank to merchant
+
+Bank to merchant 
+
+Parameter Name	Parameter Description	Mandatory Flag (Y/N)	Max Length	Remarks
+PRN	Payment Reference No from the Merchant Site	          Y	30	
+BID	Bank Reference Number	          Y	20	
+PAID	Payment status (Y/N)	          Y		
+AMT	Transaction amount	          Y	14,2	
+ACCOUNTNO	Customer debit account number	          Y	15	
+PAYDATE	Transaction date and time	          Y	30	DD-MMM-YY HH.MM.SS.SSS
+REMNAME	Remitter name ( User)	          Y	60	
+PAYREFNO	Bank CBS reference number	          Y	40	
+
+Response - 
+    {
+    "statusCode": "000",
+    "statusDescription": "Success",
+    "verificationResponse": "A4FA7BB8F46D5BFF7F1DB42C3392BFC239CADC4F486122F3C0F79FDA8EBE1F88FBD80C10735D8530B55D2C78694B6764C7D88C3C120B953950A6EE096D63388EB580E0060641A38BCE17A3A58571BC6952380C87240193C34B3C7A414C502A9E265BA3FA756C75F2CA2C42669F183A1BA6C3037113358B1769D7AC98F0FA83F7D896A08E44FA7E108AB933FC124CA49FF65EA2CF737045E61A2E5C0CF440BD04A56274F3F5C7A5C2ED492764E96A5811F27338B4332D6D7303D650A1CB868302F1B60E2F15FA6CFC3A8487D631598EEB7EB3A969224B7A0EC2B3945124EB6EC276A17235C5ECDC2BBF393851DD06C5B1"
+}
+Result values will be :- Success/Failure
+statusCode ‘000’ for Success and rest of the values will be  Failure scenarios
+Field Description→
+Checksum Input Plain String  :-   PRN=DLBXEO-&BID=22081909313344392&PAID=Y&AMT=100&ACCOUNTNO=099717700000051&PAYDATE=30-Aug-22 10.34.18.925 AM&REMNAME=AMITH MOHAN A&PAYREFNO=4172120220310000100076834
+Plain String for response encryption :-
+PRN=DLBXEO-&BID=22081909313344392&PAID=Y&AMT=100&ACCOUNTNO=099717700000051&PAYDATE=30-Aug-22 10.34.18.925 AM&REMNAME=AMITH MOHAN A&PAYREFNO=4172120220310000100076834&CHECKSUM=c9c9ae10abe9a7a2c6e298ca83cbd2f04c96771ce1324898e1713b91ca3f27f8
+
+
+
+-- ** -- ** --
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
