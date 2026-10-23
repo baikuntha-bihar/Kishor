@@ -243,10 +243,101 @@ IWQRYTASKOBJNAME=bay_mc_login&BY_BANKID=ICI&MD=V&PID=<PayeeId>&PRN=<PRN>&ITC
 http://payments.icici.bank.in/sm/BANKAWAYIWQRYTASKOBJNAME=bay_mc_login&BAY_BANKID=I 
 CI&MD=V&PID=000000000105&PRN=2054g200&ITC=650123&AMT=240.00&CRN=INR&Pmt_Date=20
 05-10-23 
+=================================================================================================================================================================================
 
-===========================
+================================================================
+SECTION 4: FORM_POSTING_TEMPLATE
+================================================================
+
+PLAIN HTML (reference only - DO NOT store in DB):
+
+<html>
+<body onload=document.forms[0].submit()>
+<form method="${METHOD}" action="${ACTION_URL}">
+<input type="hidden" name="SBMTTYPE" value="POST">
+<input type="hidden" name="MD" value="${MD}">
+<input type="hidden" name="PID" value="${PID}">
+<input type="hidden" name="ES" value="${ENC_DATA}">
+</form>
+</body>
+</html>
+
+
+public HashMap<String, String> getForm_ICICIRetail(String encData, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) {
+        HashMap<String, String> map = new HashMap<>();
+        map.put("ACTION_URL", otherInbChannelUnitMappingDto.getBankUrl());
+        map.put("METHOD", otherInbChannelUnitMappingDto.getFormPostingMethod());
+        map.put("SBMTTYPE",ICICI_SBMTTYPE);
+        map.put("MD",ICICI_MD);
+        map.put("ENC_DATA", encData);
+        map.put("PID", transactionDto.getMerchantId());
+        return map;
+
+    }
+
+
+5794ED7A8462CAE7E0637D86B10AD17A	131	NB	PRN={0}&ITC={1}&AMT={2}&CRN=INR&RU=https://uat.sbiepay.sbi/payagg/AggICICINetBankingGatewayServlet&CG=Y	PRN={0}&ITC={1}&AMT={2}&CRN=INR&PAID={4}&BID={3}	IWQRYTASKOBJNAME={0}&BAY_BANKID={1}&MD={2}&PID={3}&PRN={4}&ITC={5}&AMT={6}&CRN=INR&BID={7}	IWQRYTASKOBJNAME={0}&BAY_BANKID={1}&MD={2}&PID={3}&PRN={4}&ITC="ICICI BANK"&AMT={5}&CRU_CONSTRN="INR"&BID={6}	YES	PAYMENT		iciciEncrypt	iciciDecrypt	https://uat.sbiepay.sbi/payagg/AggICICINetBankingGatewayServlet				uxowYdKK3so2w6Ad		uxowYdKK3so2w6Ad				system	system	172333333333	172333333333	A	ok	https://cibnext.icicibank.com/corp/BANKAWAY	https://shopping.icicibank.com/corp/BANKAWAY		PGh0bWw+Cjxib2R5IG9ubG9hZD1kb2N1bWVudC5mb3Jtc1swXS5zdWJtaXQoKT4KPGZvcm0gbWV0aG9kPSIke01FVEhPRH0iIGFjdGlvbj0iJHtBQ1RJT05fVVJMfSI+CjxpbnB1dCB0eXBlPSJoaWRkZW4iIG5hbWU9IlNCTVRUWVBFIiB2YWx1ZT0iUE9TVCI+CjxpbnB1dCB0eXBlPSJoaWRkZW4iIG5hbWU9Ik1EIiB2YWx1ZT0iJHtNRH0iPgo8aW5wdXQgdHlwZT0iaGlkZGVuIiBuYW1lPSJQSUQiIHZhbHVlPSIke1BJRH0iPgo8aW5wdXQgdHlwZT0iaGlkZGVuIiBuYW1lPSJFUyIgdmFsdWU9IiR7RU5DX0RBVEF9Ij4KPC9mb3JtPgo8L2JvZHk+CjwvaHRtbD4=	POST	processInitiate	ICICIRetailEncryptionDecryptionUtil			
+
+
+
+
+BANK Name:-ICICI Bank - Retail
+
+ATRN:0460951106955(SUCCESS)
+
+web req:-
+PRN=Maharashtra State Electricity Distribution Company Limited0460951106955&ITC=0460951106955&AMT=1860.00&CRN=INR&RU=%22https://www.sbiepay.sbi/payagg/AggICICINetBankingGatewayServlet%22&CG=Y
+web request : PRN={0}&ITC={1}&AMT={2}&CRN=INR&RU={3}&CG=Y
+
+https://payments.icici.bank.in/sm/BANKAWAY?IWQRYTASKOBJNAME=bay_mc_login&BAY_BANKI
+D=ICI&MD=P&PID=000000000212&SPID=100000000004&PRN=1212567892&ITC=1023814&AMT=1.
+00&CRN=INR&RU=%22https://commerce.rediff.com/commerce/returntorediff.jsp?payopt=ICI&redeem
+gc=n&gcertno=%22&CG=Y
+
+
+web res:-
+PRN=Maharashtra State Electricity Distribution Company Limited0460951106955ITC=0460951106955AMT=1860.00CRN=INRPAID=YBID=1241769591
+
+ web Response : PRN={0}&ITC={1}&AMT={2}&CRN=INR&PAID={4}&BID={3}
+
+dv req:-
+IWQRYTASKOBJNAME=bay_mc_login&BAY_BANKID=ICI&MD=V&PID=000000001281&PRN=Maharashtra State Electricity Distribution Company Limited0460951106955&ITC=0460951106955&AMT=1860.00&CRN=INR&BID=1241769591
+
+IWQRYTASKOBJNAME={0}&BAY_BANKID={1}&MD={2}&PID={3}&PRN={4}&ITC={5}&AMT={6}&CRN=INR&BID={7}
+
+dv res:-
+
+
+iciciDvurlConn : Before Retry POST Response Code ::200 ,for 0460951106955
+In iciciDvurlConn response:<table BORDER="4" WIDTH="100%" CELLPADDING="0" CELLSPACING="0" BGCOLOR="#000000"><tr><td><FONT FACE="ARIAL,MONACO" SIZE=+1 COLOR="#00FF00">Your Payment is Successful</FONT>&nbsp;</td></tr></table><p><a href='null?PRN=MaharashtraStateElectricityDistributionCompanyLimited0460951106955&PID=000000001281&BID=1241769591&AMT=1860.00&CRN=INR&BankId=026&MD=V&PmtStatus=Successful&ITC=0460951106955'>Return to Shopping Site</a><p> ,for 0460951106955
+Double Verificaation xmlResult : <table BORDER="4" WIDTH="100%" CELLPADDING="0" CELLSPACING="0" BGCOLOR="#000000"><tr><td><FONT FACE="ARIAL,MONACO" SIZE=+1 COLOR="#00FF00">Your Payment is Successful</FONT>&nbsp;</td></tr></table><p><a href='null?PRN=MaharashtraStateElectricityDistributionCompanyLimited0460951106955&PID=000000001281&BID=1241769591&AMT=1860.00&CRN=INR&BankId=026&MD=V&PmtStatus=Successful&ITC=0460951106955'>Return to Shopping Site</a><p>
+
+IWQRYTASKOBJNAME={0}&BAY_BANKID={1}&MD={2}&PID={3}&PRN={4}&ITC={5}&AMT={6}&CRN=INR&BID={7}
+
+---------------------------------------------------------------
+
+BANK Name:-ICICI Bank - Corporate
+ATRN:-2318343406046 (SUCCESS)
+
+web req:-
+PRN=412738801&ITC=2318343406046&AMT=155720.0&CRN=INR&CYBERR=Y&CG=Y&RU=https://epay.sbi.bank.in/payagg/AggICICICorpNetBankingGatewayServlet?PRN=412738801&ITC=2318343406046
+
+web res:-
+AMT=155720.0BID=1241756967PRN=412738801ITC=2318343406046PAID=YCRN=INR
+
+dv req:-
+Action.ShoppingMall.Login.Init=Y&BankId=ICI&USER_LANG_ID=001&AppType=corporate&UserType=2?ShowOnSamePage=Y&MD=V&PID=000000001605&PRN=412738801&ITC=2318343406046&AMT=155720.0&CRN=INR&Pmt_Date=2026-08-28&BID=1241756967&RU=https://epay.sbi.bank.in/payagg/AggICICICorpNetBankingGatewayServlet
+
+dv res:-
+dvURLConnMethod Double verification Response : <?xml version="1.0" encoding="UTF-8" ?><VerifyOutput BILL REF NUMBER="412738801" PAYMENTID="1241756967" CONSUMER CODE="2318343406046" AMOUNT="155720.0" CURRENCY= "INR" STATUS="Y"/> for 2318343406046 - AggWebServiceClient
+Double Verificaation xmlResult : <?xml version="1.0" encoding="UTF-8" ?><VerifyOutput BILL REF NUMBER="412738801" PAYMENTID="1241756967" CONSUMER CODE="2318343406046" AMOUNT="155720.0" CURRENCY= "INR" STATUS="Y"/>for : 2318343406046
+
+
+
+
+=================================================================================================================================================================================
 ICICI Documents
-=======================
+=================================================================================================================================================================================
 ICICI Net Banking Technical Integration 
 Note Internet Banking ICICI Bank Ltd. 
 1 
