@@ -1,3 +1,1320 @@
+Dhanalaxmi bank
+==================================================================================================================================================================================================================================
+=====================================================================================================================================================
+=====================================================================================================================================================
+// ==========================================================================
+//  OtherINBPaymentInitiationController
+// ==========================================================================
+@RestController
+@RequiredArgsConstructor
+@Validated
+@Tag(name = OtherInbConstants.OTHER_INB_INITIATION_TAG_VALUE)
+@RequestMapping("/other-inb/sbi")
+public class OtherINBPaymentInitiationController {
+
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+    public final OtherInbPaymentService otherInbPaymentService;
+
+    @PostMapping("/initiate")
+    @Operation(summary = "Other INB Bank channel transaction initiation api",description = "This API is used for Other Bank transactions initiations.")
+    public PaymentResponse<OtherInbPostingData> otherInbInitiateWebRequest(@Valid @RequestBody PaymentRequest paymentRequest) {
+        logger.info("Other INB Payment initiation controller start {} ", paymentRequest.getAtrn());
+        return otherInbPaymentService.generateReqPayload(paymentRequest);
+    }
+}
+
+
+// ==========================================================================
+//  OtherInbPaymentService
+// ==========================================================================
+
+
+@RequiredArgsConstructor
+@Service
+public class OtherInbPaymentService {
+
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+    private final TransactionDao transactionDao;
+    private final OtherInbRoutingUtil otherInbRoutingUtil;
+    private final OtherInbPaymentValidator otherInbPaymentValidator;
+    private final OtherInbChannelUnitMappingDao otherInbChannelUnitMappingDao;
+    /**
+     * @return -JSON : PaymentResponse<PostingData> (1.postURL, 2.data, 3.Key, 4.merchantCode)
+     * @methodName: Generate Web Request Payload.
+     * @@Method-Description: The purpose of this method is to create web request and encrypt request.
+     * @param: generateReqPayload
+     * @Exception or @Error :Exception
+     */
+    public PaymentResponse<OtherInbPostingData> generateReqPayload(PaymentRequest paymentWebRequest){
+        return processInitiation(paymentWebRequest);
+    }
+        /**
+         * @return -JSON : PaymentResponse<PostingData> (1.postURL, 2.data, 3.Key, 4.merchantCode)
+         * @methodName: Generate Web Request Payload.
+         * @@Method-Description: The purpose of this method is to create web request and encrypt request.
+         * @param: generateReqPayload
+         * @Exception or @Error :Exception
+         */
+    public PaymentResponse<OtherInbPostingData> processInitiation(PaymentRequest paymentWebRequest){
+        //Routing Logic started here
+        logger.info("Other INB Payment Initiation Start for Atrn {} ", paymentWebRequest.getAtrn());
+        //otherInbPaymentValidator.validateOtherInbInitiationRequest(paymentWebRequest.getAtrn());
+        TransactionDto transactionDto = transactionDao.getValidPaymentAckReq(paymentWebRequest.getAtrn(), PaymentStatus.BOOKED.toString(), OtherInbConstants.NB_CONST);
+        otherInbPaymentValidator.validateDebitAmount(transactionDto.getDebitAmt());
+        logger.info("Other INB Payment Initiation get atrn details {} ", transactionDto);
+        OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto  = getGatewayConfigData(transactionDto);
+        logger.info("otherInbChannelUnitMappingDto. {}",otherInbChannelUnitMappingDto);
+        try {
+            OtherInbPostingData otherInbPostingDataPaymentResponse = otherInbRoutingUtil.getMethodInvocation(otherInbChannelUnitMappingDto, paymentWebRequest, transactionDto);
+            return PaymentResponse.<OtherInbPostingData>builder().status(1).data(List.of(otherInbPostingDataPaymentResponse)).build();
+        } catch ( NoSuchMethodException | InvocationTargetException | IllegalAccessException ie) {
+            throw new OtherInbPaymentException(ErrorConstants.GENERIC_ERROR_CODE, MessageFormat.format(ErrorConstants.GENERIC_ERROR_MESSAGE,OtherInbConstants.ONB_SERVICE));
+        }
+        //Routing Logic ended here
+    }
+
+    public OtherInbChannelUnitMappingDto getGatewayConfigData(TransactionDto transactionDto) {
+        logger.info("Other INB Payment Initiation gtwMapId. {} and unitName. {} ", transactionDto.getGtwMapId(), OtherInbConstants.PAYMENT);
+        return otherInbChannelUnitMappingDao.getOtherInbConfigData(transactionDto.getGtwMapId(), OtherInbConstants.PAYMENT);
+    }
+
+}
+
+// ==========================================================================
+//  TransactionDao
+// ==========================================================================
+
+
+@Component
+@RequiredArgsConstructor
+public class TransactionDao {
+
+    private final TransactionRepository transactionRepository;
+    private final TransactionMapper transactionMapper;
+
+    public TransactionDto getValidPaymentAckReq(String atrn, String paymentStatus) {
+        MerchantOrderPayments merchantOrderPayments = transactionRepository.findByAtrnNumAndTransactionStatus(atrn, paymentStatus)
+                .orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.INVALID_ERROR_CODE, MessageFormat
+                        .format(ErrorConstants.INVALID_ERROR_MESSAGE, OtherInbConstants.atrn, OtherInbConstants.ATRN_NOT_FOUND)));
+        return transactionMapper.mapToTransactionDto(merchantOrderPayments);
+    }
+
+    public TransactionDto getValidPaymentAckReq(String atrn, String paymentStatus, String payMode) {
+        MerchantOrderPayments merchantOrderPayments = transactionRepository.findByAtrnNumAndTransactionStatusAndPayMode(atrn, paymentStatus, payMode)
+                .orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.INVALID_ERROR_CODE, MessageFormat
+                        .format(ErrorConstants.INVALID_ERROR_MESSAGE, OtherInbConstants.atrn, OtherInbConstants.ATRN_NOT_FOUND)));
+        return transactionMapper.mapToTransactionDto(merchantOrderPayments);
+    }
+
+
+    public TransactionDto getValidPaymodePaymentAckReq(String atrn, String payMode) {
+        MerchantOrderPayments merchantOrderPayments = transactionRepository.findByAtrnNumAndPayMode(atrn, payMode)
+                .orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.INVALID_ERROR_CODE, MessageFormat
+                        .format(ErrorConstants.INVALID_ERROR_MESSAGE, OtherInbConstants.atrn, OtherInbConstants.ATRN_NOT_FOUND)));
+        return transactionMapper.mapToTransactionDto(merchantOrderPayments);
+    }
+
+
+    public TransactionDto getTransactionDetails(String atrn) {
+        MerchantOrderPayments byAtrn = transactionRepository.findByAtrnNum(atrn);
+        return transactionMapper.mapToTransactionDto(byAtrn);
+    }
+
+    public List<TransactionDto> getBookingMerchantOrderPayments() {
+        return transactionMapper.mapMerchantOrderPaymentEntity(transactionRepository.findBookingMerchantOrderPayments());
+    }
+
+
+}
+
+// ==========================================================================
+//  OtherInbRoutingUtil
+// ==========================================================================
+
+package com.epay.otherinb.util.routing;
+
+import com.epay.otherinb.dto.OtherInbChannelUnitMappingDto;
+import com.epay.otherinb.dto.TransactionDto;
+import com.epay.otherinb.entity.OtherInbPostingData;
+import com.epay.otherinb.exceptions.OtherInbPaymentException;
+import com.epay.otherinb.model.request.PaymentRequest;
+import com.epay.otherinb.util.constants.ErrorConstants;
+import com.epay.otherinb.util.constants.OtherInbConstants;
+import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationContext;
+import org.springframework.stereotype.Component;
+
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.text.MessageFormat;
+import java.util.Optional;
+
+
+/**
+ * Class Name:OtherInbRoutingUtil
+ * *
+ * Description: Card Payment Service
+ * *
+ * Author: VCE2645 - Siddhesh Nikam (Dev Lead SBIePAY)
+ * Copyright (c) 2026 [State Bank of India]
+ * All rights reserved
+ * *
+ * Version:1.0
+ */
+@Component
+@RequiredArgsConstructor
+public class OtherInbRoutingUtil {
+    private final ApplicationContext applicationContext;
+
+    public OtherInbPostingData getMethodInvocation(OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto,PaymentRequest paymentWebRequest,TransactionDto transactionDto) throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
+        Method method = applicationContext.getBean(otherInbChannelUnitMappingDto.getBankRoutingClass()).getClass().getMethod(otherInbChannelUnitMappingDto.getBankRoutingMethod(),PaymentRequest.class,TransactionDto.class,OtherInbChannelUnitMappingDto.class);
+        OtherInbPostingData otherInbPostingData= (OtherInbPostingData) method.invoke(applicationContext.getBean(otherInbChannelUnitMappingDto.getBankRoutingClass()),paymentWebRequest,transactionDto,otherInbChannelUnitMappingDto);
+        return Optional.ofNullable(otherInbPostingData).orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.OTHER_INB_ERROR_CODE, ErrorConstants.OTHER_INB_ERROR_MESSAGE));
+    }
+
+
+}
+
+
+// ==========================================================================
+//  OtherInbPaymentValidator
+// ==========================================================================
+
+
+@Component
+@RequiredArgsConstructor
+public class OtherInbPaymentValidator extends BaseValidator {
+
+    public synchronized void validateOtherInbInitiationRequest(String atrn_num) {
+        errorDtoList.clear();
+        validateOINBRequest(atrn_num);
+    }
+
+    //Other INB Validator..
+    public void validateOINBRequest(String atrn_num) {
+        errorDtoList.clear();
+        checkMandatoryField(atrn_num, OtherInbConstants.ATRN);
+        checkForLeadingTrailingAndSingleSpace(atrn_num, OtherInbConstants.ATRN);
+        validateFieldLength(atrn_num, OtherInbConstants.ATRN_LENGTH, OtherInbConstants.ATRN);
+        validateFieldWithRegex(atrn_num, OtherInbConstants.ATRN_ARRN_REGEX_DIGIT, OtherInbConstants.ATRN, OtherInbConstants.INVALID_ATRN_CONST);
+    }
+
+
+    //    //BOM Validator
+//    public boolean checkResponseParamDataBom(String decryptedWebResponse) {
+////        return decryptedWebResponse.contains(OtherInbConstants.PID_CONST) && decryptedWebResponse.contains(OtherInbConstants.BRN_CONST)
+////                && decryptedWebResponse.contains(OtherInbConstants.AMT_CONST) && decryptedWebResponse.contains(OtherInbConstants.MODE_CONST)
+////                && decryptedWebResponse.contains(OtherInbConstants.NAR_CONST) && decryptedWebResponse.contains(OtherInbConstants.TID_CONST)
+////                && decryptedWebResponse.contains(OtherInbConstants.STATUS_CONST)
+////                && decryptedWebResponse.contains(OtherInbConstants.TDATETIME_CONST)
+////                && decryptedWebResponse.contains(OtherInbConstants.CURRENCY_CONST);
+//    }
+    public void validateNBCallBack(BOMMapWebResponseDto nbCallBackResponse) {
+        errorDtoList.clear();
+
+//        checkMandatoryField(nbCallBackResponse.getTxnAmount(), OtherInbConstants.AMOUNT);
+//        checkMandatoryField(nbCallBackResponse.getPrn(),OtherInbConstants.BRN_CONST);
+//        checkMandatoryField(nbCallBackResponse.getNar(), OtherInbConstants.NAR_CONST);
+//        checkMandatoryField(nbCallBackResponse.getTid(), OtherInbConstants.TID_CONST);
+//        checkMandatoryField(nbCallBackResponse.getStatus(), OtherInbConstants.STATUS);
+//
+//        checkForLeadingTrailingAndSingleSpace(nbCallBackResponse.getTxnAmount(), OtherInbConstants.AMOUNT);
+//        checkForLeadingTrailingAndSingleSpace(String.valueOf(nbCallBackResponse.getPrn()), OtherInbConstants.BRN_CONST);
+//        checkForLeadingTrailingAndSingleSpace(nbCallBackResponse.getNar(), OtherInbConstants.NAR_CONST);
+//        checkForLeadingTrailingAndSingleSpace(nbCallBackResponse.getTid(), OtherInbConstants.TID_CONST);
+//        checkForLeadingTrailingAndSingleSpace(nbCallBackResponse.getStatus(), OtherInbConstants.STATUS);
+//
+//        validateFieldWithRegex(nbCallBackResponse.getPrn(), OtherInbConstants.ATRN_ARRN_REGEX_DIGIT, OtherInbConstants.BRN_CONST,OtherInbConstants.INVALID_ATRN_CONST);
+//        validateFieldLength(nbCallBackResponse.getPrn(), OtherInbConstants.ATRN_LENGTH, OtherInbConstants.BRN_CONST);
+    }
+
+    public synchronized void validateDebitAmount(BigDecimal debitAmt) {
+        errorDtoList.clear();
+        //validateAmountFormat(debitAmt);
+        throwIfErrors();
+    }
+
+    void validateAmountFormat(BigDecimal debitAmt) {
+        if (Objects.isNull(debitAmt) || (debitAmt.signum() <= 0)) {
+            addError(ErrorConstants.INVALID_ERROR_CODE, MessageFormat.format(ErrorConstants.INVALID_ERROR_MESSAGE, OtherInbConstants.DEBIT_AMOUNT_CONST, OtherInbConstants.DEBIT_AMOUNT_GREATER_ZERO_CONST));
+        }
+
+    }
+
+    public void validateNBCallBack(RBLRetailResponseDto rblRetailResponseDto) {
+        errorDtoList.clear();
+        /*System.out.println("Mandatory field validation start");
+        checkMandatoryField(String.valueOf(rblRetailResponseDto.getAmount()), OtherInbConstants.AMT);
+        System.out.println("Mandatory field validated - AMT");
+        checkMandatoryField(rblRetailResponseDto.getRefNo(), OtherInbConstants.REFNO);
+        System.out.println("Mandatory field validated - REFNO");
+        checkMandatoryField(rblRetailResponseDto.getStatus(), OtherInbConstants.STATUS);
+        System.out.println("Mandatory field validated - STATUS");
+        //checkMandatoryField(bobNbMapWebResponseDto.getStatus_desc(), PaymentConstants.STATUS_DESC);
+        checkMandatoryField(rblRetailResponseDto.getCheckSum(), OtherInbConstants.CHECKSUM);
+
+            System.out.println("Mandatory field validated - CHECKSUM");*/
+    }
+
+    public boolean checkBOBResponseParamData(String decryptedWebResponse) {
+        return true;//decryptedWebResponse.contains(OtherInbConstants.PAID) && decryptedWebResponse.contains(OtherInbConstants.ITC) && decryptedWebResponse.contains(OtherInbConstants.PRN) && decryptedWebResponse.contains(OtherInbConstants.PID) && decryptedWebResponse.contains(OtherInbConstants.BID) && decryptedWebResponse.contains(OtherInbConstants.AMT);
+    }
+
+    public boolean checkSum(String bankChecksum, String createdChecksum) {
+        errorDtoList.clear();
+        return true;//checkSumFieldMatched(bankChecksum, createdChecksum);
+    }
+
+    private boolean checkSumFieldMatched(String bankChecksum, String createdChecksum) {
+        return !bankChecksum.isEmpty() && bankChecksum.equals(createdChecksum);
+    }
+
+    // Ref no not blank, null and zero
+    public boolean ValidateWebResponsePid(String pid) {
+        return StringUtils.isNotBlank(pid) && !pid.equals("0");
+    }
+
+    public void validateNBCallBack(IndusindRetailNbResponseDto indusindRetailNbResponseDto) {
+        errorDtoList.clear();
+        /*checkMandatoryField(String.valueOf(indusindRetailNbResponseDto.getAmt()), OtherInbConstants.AMT);
+        checkMandatoryField(indusindRetailNbResponseDto.getBid(), OtherInbConstants.BID);
+        checkMandatoryField(indusindRetailNbResponseDto.getPaid(), OtherInbConstants.PAID);
+        //checkMandatoryField(bobNbMapWebResponseDto.getStatus_desc(), PaymentConstants.STATUS_DESC);
+        checkMandatoryField(indusindRetailNbResponseDto.getCheckSum(), OtherInbConstants.CHECKSUM);*/
+    }
+
+    public void validateNBCallBack(CBIResponseDto cbiResponseDto) {
+        errorDtoList.clear();
+
+    }
+
+    public void validateOINBRequiredCallBack(String value, String fieldName) {
+        if (value == null) {
+            errorDtoList.clear();
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, MessageFormat.format(ErrorConstants.REQUIRED_ERROR_MESSAGE, fieldName));
+            throwIfErrors();
+        }
+        if ((fieldName.equalsIgnoreCase(OtherInbConstants.STATUS) && !OtherInbConstants.SUCCESS.equalsIgnoreCase(value)) && !OtherInbConstants.FAILURE.equalsIgnoreCase(value) && !OtherInbConstants.PENDING_CONST.equalsIgnoreCase(value) && value.length() <= 25) {
+            errorDtoList.clear();
+            addError(fieldName, ErrorConstants.INVALID_ERROR_CODE, MessageFormat.format(ErrorConstants.INVALID_ERROR_MESSAGE, fieldName, OtherInbConstants.INVALID_TXN_STATUS_FORMAT));
+            throwIfErrors();
+        }
+
+    }
+
+    public void validateOINBAmountCallBack(String amount, String fieldName) {
+        if (OtherInbConstants.NA.equalsIgnoreCase(amount)) {
+            errorDtoList.clear();
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+
+//        } else if (!StringUtils.isNotBlank(amount)) {
+//            errorDtoList.clear();
+//            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+        } else if (!amount.matches(OtherInbConstants.NUMBER_DECIMAL_REGEX)) {
+            errorDtoList.clear();
+            validateFieldWithRegex(amount, OtherInbConstants.NUMBER_DECIMAL_REGEX, fieldName, "INCORRECT_FORMAT");
+            throwIfErrors();
+        } else if (new BigDecimal(amount).signum() <= 0) {
+            errorDtoList.clear();
+            addError(fieldName, ErrorConstants.INVALID_ERROR_CODE, MessageFormat.format(ErrorConstants.INVALID_ERROR_MESSAGE, fieldName, "Amount must be greater than 0"));
+            throwIfErrors();
+        } else if (new BigDecimal(amount).scale() > 2) {
+            //   logger.info("validate Payment Initiation, Validating up to 2 decimal point: {}",new BigDecimal(amount));
+            errorDtoList.clear();
+            addError(ErrorConstants.INVALID_ERROR_CODE, MessageFormat.format(ErrorConstants.INVALID_ERROR_MESSAGE, fieldName, "Validating up to 2 decimal point"));
+            throwIfErrors();
+        }
+//        }else if (StringUtils.isNotEmpty(new BigDecimal(amount).toString()) && (new BigDecimal(amount).precision()- new BigDecimal(amount).scale()) > 18) {
+//            errorDtoList.clear();
+//         //   logger.info("field {} exceeds maxLength {}", fieldName, 18);
+//            addError(ErrorConstants.INVALID_ERROR_CODE, "The maximum allowed length for Debit amount before decimal is 18.");
+//            throwIfErrors();
+//        }
+        else {
+            errorDtoList.clear();
+            validateFieldWithRegex(amount, OtherInbConstants.AMOUNT_REGEX, fieldName, "INCORRECT_FORMAT");
+            throwIfErrors();
+        }
+    }
+
+
+    public boolean checkResponseParamData(String decryptedWebResponse) {
+        return true; //decryptedWebResponse.contains(OtherInbConstants.STATUS) && decryptedWebResponse.contains(OtherInbConstants.REFNO) && decryptedWebResponse.contains(OtherInbConstants.PRN) && decryptedWebResponse.contains(OtherInbConstants.ITC) && decryptedWebResponse.contains(OtherInbConstants.AMT) && decryptedWebResponse.contains(OtherInbConstants.CRN) && decryptedWebResponse.contains(OtherInbConstants.ACNT_NUM);
+    }
+
+    public boolean checkIndusIndResponseParamData(String decryptedWebResponse) {
+        return true;//decryptedWebResponse.contains(OtherInbConstants.PAID) && decryptedWebResponse.contains(OtherInbConstants.ITC) && decryptedWebResponse.contains(OtherInbConstants.PRN) && decryptedWebResponse.contains(OtherInbConstants.PID) && decryptedWebResponse.contains(OtherInbConstants.BID) && decryptedWebResponse.contains(OtherInbConstants.AMT);
+    }
+
+    // Ref no not blank, null and zero
+    public boolean ValidateWebResponseBankReferenceNumber(String webSbiRefNo) {
+        return StringUtils.isNotBlank(webSbiRefNo) && !webSbiRefNo.equals("0");
+    }
+
+    public void validateNBCallBack(BobNbMapWebResponseDto bobNbMapWebResponseDto) {
+        errorDtoList.clear();
+        /*checkMandatoryField(String.valueOf(bobNbMapWebResponseDto.getAmount()), OtherInbConstants.AMT);
+        checkMandatoryField(bobNbMapWebResponseDto.getRefNo(), OtherInbConstants.REFNO);
+        checkMandatoryField(bobNbMapWebResponseDto.getStatus(), OtherInbConstants.STATUS);
+        //checkMandatoryField(bobNbMapWebResponseDto.getStatus_desc(), PaymentConstants.STATUS_DESC);
+        checkMandatoryField(bobNbMapWebResponseDto.getCheckSum(), OtherInbConstants.CHECKSUM);*/
+
+    }
+
+    public boolean checkResponseParamDataAxis(String decryptedWebResponse) {
+        return decryptedWebResponse.contains(OtherInbConstants.PAID) && decryptedWebResponse.contains(OtherInbConstants.ITC) && decryptedWebResponse.contains(OtherInbConstants.PRN) && decryptedWebResponse.contains(OtherInbConstants.PID) && decryptedWebResponse.contains(OtherInbConstants.BID) && decryptedWebResponse.contains(OtherInbConstants.AMT);
+    }
+
+    //********************************************** UBI Retail Validation Starts ***************************************************
+
+    public void validateUbiCallBackRequest(String request) {
+        if (Objects.isNull(request) || request.isEmpty() || request.isBlank()) {
+            throw new OtherInbPaymentException("500", "Invalid Request. QS data is Required.");
+        }
+    }
+
+    public boolean validateUBIWebResponse(String decryptedResponse) {
+        return decryptedResponse.contains("PGID") && decryptedResponse.contains("BillerID") && decryptedResponse.contains("Amount") && decryptedResponse.contains("PGRef") && decryptedResponse.contains("Status") && decryptedResponse.contains("CheckSum");
+    }
+
+    //********************************************** UBI Retail Validations End *****************************************************
+
+    //********************************************** Dhanalaxmi Retail Validations Starts *****************************************************
+//    public void validateICICIcallBack(DhanalaxmiResponseDto respose){
+////        validateNBAmountCallBack(map.get(PaymentConstants.AMOUNT), PaymentConstants.AMOUNT);
+////        validateNBRequiredCallBack(map.get(PaymentConstants.WALLET_ORDERID), PaymentConstants.WALLET_ORDERID);
+////        validateNBRequiredCallBack(map.get(PaymentConstants.WALLET_STATUSCODE), PaymentConstants.WALLET_STATUSCODE);
+////        validateNBRequiredCallBack(map.get(PaymentConstants.WALLET_STATUSMESSAGE), PaymentConstants.WALLET_STATUSMESSAGE);
+//
+//    }
+//
+//  public void validateDhanalaxmiWebResponse(Map<String,String>  map ){
+//
+//  }
+//
+////    static DecimalFormat formatter = new DecimalFormat(PaymentConstants.TWO_DECIMAl_DIGIT);
+//    public boolean validateWebAndDvAmt(BigDecimal webAmt, BigDecimal DvAmt) {
+////        errorDtoList.clear();
+////        return  validateWebAndDVAmtFormat(webAmt,DvAmt);
+//        return true;
+//    }
+//
+//    private synchronized boolean validateWebAndDVAmtFormat(BigDecimal webAmt, BigDecimal dvAmt) {
+////        return (Objects.equals(new BigDecimal(formatter.format(webAmt)), new BigDecimal(formatter.format(dvAmt))));
+//        return true;
+//    }
+//
+//    public boolean ValidateBankReferenceNumber(String webSbiRefNo, String dvSbiRefNo) {
+////        return StringUtils.isNotBlank(webSbiRefNo) && !webSbiRefNo.equals("0") && !dvSbiRefNo.equals("0");
+//        return true;
+//    }
+
+    public void validateDhanalaxmicallBack(DhanalaxmiResponseDto response) {
+        if (response.getAtrn() == null || response.getAtrn().isEmpty()) {
+            throw new OtherInbPaymentException(ErrorConstants.INVALID_ERROR_CODE, "ATRN is missing in Web Response");
+        }
+        if (response.getAmount() == null || response.getAmount().signum() <= 0) {
+            throw new OtherInbPaymentException(ErrorConstants.INVALID_ERROR_CODE, "Invalid Amount in Web Response");
+        }
+    }
+
+    public void validateDhanalaxmiWebResponse(Map<String, String> map) {
+        if (!map.containsKey("PRN") || !map.containsKey("BID") || !map.containsKey("PAID") || !map.containsKey("AMT")) {
+            throw new OtherInbPaymentException(ErrorConstants.DHANALAXMI_WEB_RESPONSE_ERROR_CODE, "Missing mandatory fields (PRN, BID, PAID, AMT) in decrypted web response");
+        }
+    }
+
+    public boolean validateWebAndDvAmt(BigDecimal webAmt, BigDecimal dvAmt) {
+        if (webAmt == null || dvAmt == null) return false;
+        return webAmt.setScale(2, java.math.RoundingMode.HALF_UP).compareTo(dvAmt.setScale(2, java.math.RoundingMode.HALF_UP)) == 0;
+    }
+
+    public boolean ValidateBankReferenceNumber(String webSbiRefNo, String dvSbiRefNo) {
+        return StringUtils.isNotBlank(webSbiRefNo) && !webSbiRefNo.equals("0") && webSbiRefNo.equals(dvSbiRefNo);
+    }
+
+
+    //********************************************** Dhanalaxmi Retail Validations End *****************************************************
+    public void validateOtherInbCallBack(SaraswatResponseDto saraswatCallBackResponse) {
+        errorDtoList.clear();
+        //validateFieldWithRegex(String.valueOf(saraswatCallBackResponse.getTxnAmount()), OtherInbConstants.AMOUNT_REGEX, OtherInbConstants.AMOUNT, OtherInbConstants.INVALID_TXN_AMT_FORMAT);
+    }
+    //********************************************** SOI Validations Start *****************************************************
+
+    public void validateOtherInbCallBack(SouthIndianResponseDto southIndianResponseDto) {
+        errorDtoList.clear();
+        //validateFieldWithRegex(String.valueOf(southIndianResponseDto.getBtxnAmt()), OtherInbConstants.AMOUNT_REGEX, OtherInbConstants.AMOUNT, OtherInbConstants.INVALID_TXN_AMT_FORMAT);
+    }
+
+    /******PSB Amount validation***/
+    public void validateOtherInbCallBack(PSBRetailCorpWebResponse psbRetailCorpWebResponse) {
+        errorDtoList.clear();
+        //validateFieldWithRegex(String.valueOf(psbRetailCorpWebResponse.getAmt()), OtherInbConstants.AMOUNT_REGEX, OtherInbConstants.PARAM_AMOUNT, OtherInbConstants.INVALID_TXN_AMT_FORMAT);
+    }
+
+    /******Canara Amount validation***/
+    public void validateOtherInbCallBack(CanaraRetailCorpWebResponse canaraRetailCorpWebResponse) {
+        errorDtoList.clear();
+        //validateFieldWithRegex(String.valueOf(canaraRetailCorpWebResponse.getFldTxnAmt()), OtherInbConstants.AMOUNT_REGEX, OtherInbConstants.PARAM_AMOUNT, OtherInbConstants.INVALID_TXN_AMT_FORMAT);
+    }
+
+    //******************************iob***********************************
+    public void validateNBCallBack(IobCallbackResponse iobCallbackResponse) {
+        errorDtoList.clear();
+        System.out.println("Mandatory field validation start");
+        checkMandatoryField(String.valueOf(iobCallbackResponse.getAmt()), OtherInbConstants.AMT);
+        System.out.println("Mandatory field validated - AMT");
+        checkMandatoryField(iobCallbackResponse.getBid(), OtherInbConstants.BID);
+        System.out.println("Mandatory field validated - BID");
+        checkMandatoryField(iobCallbackResponse.getPaid(), OtherInbConstants.PAID);
+        System.out.println("Mandatory field validated - PAID");
+        //checkMandatoryField(bobNbMapWebResponseDto.getStatus_desc(), PaymentConstants.STATUS_DESC);
+        checkMandatoryField(iobCallbackResponse.getCheckSum(), OtherInbConstants.CHECKSUM);
+
+        System.out.println("Mandatory field validated - CHECKSUM");
+
+    }
+
+    //********************************************** ICICI Validations Starts *****************************************************
+
+    public void validateICICIcallBack(ICICIResponseDto respose) {
+//        validateNBAmountCallBack(map.get(PaymentConstants.AMOUNT), PaymentConstants.AMOUNT);
+//        validateNBRequiredCallBack(map.get(PaymentConstants.WALLET_ORDERID), PaymentConstants.WALLET_ORDERID);
+//        validateNBRequiredCallBack(map.get(PaymentConstants.WALLET_STATUSCODE), PaymentConstants.WALLET_STATUSCODE);
+//        validateNBRequiredCallBack(map.get(PaymentConstants.WALLET_STATUSMESSAGE), PaymentConstants.WALLET_STATUSMESSAGE);
+
+    }
+
+    public void validateICICIWebResponse(Map<String, String> map) {
+
+    }
+
+    //********************************************** ICICI Validations End *****************************************************
+
+
+}
+
+
+// ==========================================================================
+//  OtherInbChannelUnitMappingDao
+// ==========================================================================
+
+
+@Component
+@RequiredArgsConstructor
+public class OtherInbChannelUnitMappingDao {
+
+    private final OtherInbChannelUnitMappingRepository otherInbChannelUnitMappingRepository;
+    private final OtherInbPaymentMapper otherInbMapper;
+
+    public OtherInbChannelUnitMappingDto getOtherInbConfigData(String gtwMapId, String unitType) {
+        OtherInbChannelUnitMappingEntity otherInbChannelUnitMappingEntity = otherInbChannelUnitMappingRepository.findByGtwMapIdAndUnitType(gtwMapId, unitType)
+                .orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.INVALID_ERROR_CODE, MessageFormat
+                        .format(ErrorConstants.INVALID_ERROR_MESSAGE, OtherInbConstants.ATRN, OtherInbConstants.ATRN_NOT_FOUND)));
+        return otherInbMapper.mapToOtherInbTransactionDto(otherInbChannelUnitMappingEntity);
+    }
+}
+
+// ==========================================================================
+//  OtherInbChannelUnitMappingEntity
+// ==========================================================================
+
+@EqualsAndHashCode(callSuper = true)
+@Data
+@Entity
+@Table(name = "OINB_CHANNEL_UNIT_MAPPING")
+@AttributeOverrides({@AttributeOverride(name = "createdBy", column = @Column(name = "created_by")), @AttributeOverride(name = "updatedBy", column = @Column(name = "updated_by"))})
+public class OtherInbChannelUnitMappingEntity  extends AuditEntity {
+
+    @Id
+    @Column(name = "GTW_MAP_ID")
+    private String gtwMapId;
+
+    @Column(name = "PAY_MODE")
+    private String payMode;
+
+    @Column(name = "WEB_REQUEST_FORMAT")
+    private String webRequestFormat;
+
+    @Column(name = "WEB_RESPONSE_FORMAT")
+    private String webResponseFormat;
+
+    @Column(name = "VERI_REQUEST_FORMAT")
+    private String veriRequestFormat;
+
+    @Column(name = "VERI_RESPONSE_FORMAT")
+    private String veriResponseFormat;
+
+    @Column(name = "FROM_POSTING_FORMAT")
+    private String fromPostingFormat;
+
+    @Column(name = "UNIT_TYPE")
+    private String unitType;
+
+    @Column(name = "UNIT_NAME")
+    private String unitName;
+
+    @Column(name = "ENC_METHOD_NAME")
+    private String encMethodName;
+
+    @Column(name = "DEC_METHOD_NAME")
+    private String decMethodName;
+
+    @Column(name = "CHANNEL_RETURN_URL")
+    private String channelReturnUrl;
+
+    @Column(name = "CHECKSUM_METHOD_NAME")
+    private String checksumMethodName;
+
+    @Column(name = "CHECKSUM_TYPE")
+    private String checksumType;
+
+    @Column(name = "CHECKSUM_VALUE")
+    private String checksumValue;
+
+    @Column(name = "COMMON_ENC_KEY")
+    private String commonEncKey;
+
+    @Column(name = "COMMON_ENC_KEY_IV")
+    private String commonEncKeyIv;
+
+    @Column(name = "WEB_ENC_KEY")
+    private String webEncKey;
+
+    @Column(name = "WEB_ENC_KEYIV")
+    private String webEncKeyIv;
+
+    @Column(name = "VERI_EN_CKEY")
+    private String veriEncKey;
+
+    @Column(name = "VERI_ENC_KEY_IV")
+    private String veriEncKeyIv;
+
+    @Column(name = "CREATED_BY")
+    private String createdBy;
+
+    @Column(name = "UPDATED_BY")
+    private String updatedBy;
+
+    @Column(name = "UPDATED_DATE")
+    private Long updatedDate;
+
+    @Column(name = "CREATED_DATE")
+    private Long createdDate;
+
+    @Column(name = "STATUS")
+    private String status;
+
+    @Column(name = "REMARKS")
+    private String remarks;
+
+    @Column(name = "BANK_URL")
+    private String bankUrl;
+
+    @Column(name = "DV_URL")
+    private String dvUrl;
+
+    @Column(name = "TOKEN_URL")
+    private String tokenUrl;
+
+    @Column(name = "FORM_POSTING_TEMPLATE")
+    private String formPostingTemplate;
+
+    @Column(name = "FROM_POSTING_METHOD")
+    private String formPostingMethod;
+
+    @Column(name = "BANK_ROUTING_CLASS")
+    private String bankRoutingClass;
+
+    @Column(name = "BANK_ROUTING_METHOD")
+    private String bankRoutingMethod;
+
+}
+
+// ==========================================================================
+//  OtherInbPaymentMapper
+// ==========================================================================
+
+@Mapper(builder = @Builder(disableBuilder = true), componentModel = "spring")
+public interface OtherInbPaymentMapper {
+
+    OtherInbChannelUnitMappingDto mapToOtherInbTransactionDto(OtherInbChannelUnitMappingEntity otherInbChannelUnitMappingEntity);
+
+}
+
+// ==========================================================================
+//  OtherInbPaymentMapper
+// ==========================================================================
+
+
+@Setter
+@Getter
+@ToString
+@AllArgsConstructor
+@NoArgsConstructor
+@Builder(toBuilder = true)
+public class OtherInbChannelUnitMappingDto implements Serializable {
+
+    private String gtwMapId;
+    private String payMode;
+    private String webRequestFormat;
+    private String webResponseFormat;
+    private String veriRequestFormat;
+    private String veriResponseFormat;
+    private String fromPostingFormat;
+    private String unitType;
+    private String unitName;
+    private String encMethodName;
+    private String decMethodName;
+    private String channelReturnUrl;
+    private String checksumMethodName;
+    private String checksumType;
+    private String checksumValue;
+    private String commonEncKey;
+    private String commonEncKeyIv;
+    private String webEncKey;
+    private String webEncKeyIv;
+    private String veriEncKey;
+    private String veriEncKeyIv;
+    private String createdBy;
+    private String updatedBy;
+    private Long updatedDate;
+    private Long createdDate;
+    private String status;
+    private String remarks;
+    private String bankUrl;
+    private String dvUrl;
+    private String tokenUrl;
+    private String formPostingTemplate;
+    private String formPostingMethod;
+    private String bankRoutingClass;
+    private String bankRoutingMethod;
+
+}
+
+// ==========================================================================
+//  OtherInbPostingData
+// ==========================================================================
+
+@Data
+@Builder
+@Setter
+@Getter
+@AllArgsConstructor
+@NoArgsConstructor
+@ToString
+public class OtherInbPostingData {
+
+    @SerializedName(value = "atrn")
+    @JsonProperty(value = "atrn")
+    private String atrn;
+
+    @SerializedName(value = "EncryptTrans")
+    @JsonProperty(value = "EncryptTrans")
+    private String encryptTrans;
+
+    @SerializedName(value = "merchIdVal")
+    @JsonProperty(value = "merchIdVal")
+    private String merchIdVal;
+}
+
+// ==========================================================================
+//  DhanalaxmiPaymentService
+// ==========================================================================
+
+
+@RequiredArgsConstructor
+@Service
+public class DhanalaxmiPaymentService {
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+    private final OtherInbPaymentValidator otherInbpaymentValidator;
+    private final DhanalaxmiPaymentWebClientService dhanalaxmiPaymentWebClientService;
+    private final DhanaLaxmiRetailCorpEncryptionDecryptionUtil dhanaLaxmiRetailCorpEncryptionDecryptionUtil;
+    private final TransactionDao transactionDao;
+    private final OtherInbConfigDetails otherInbConfigDetails;
+    private final OrderDao orderDao;
+    private final PaymentCallbackForwardService paymentCallbackForwardService;
+    private final OtherInbPaymentValidator otherInbPaymentValidator;
+
+
+    public RedirectView processDhanalaxmiWebResponsePayload(String webResponse) throws InvalidAlgorithmParameterException, IllegalBlockSizeException, NoSuchPaddingException, BadPaddingException, NoSuchAlgorithmException, InvalidKeyException {
+        PaymentFinalResponse paymentFinalResponse = processDhanalaxmiCallBack(webResponse);
+        logger.info("Payment Dhanalaxmi response to transaction service paymentFinalResponse {} ", paymentFinalResponse);
+        TransactionDto transactionDto = transactionDao.getValidPaymentAckReq(paymentFinalResponse.getAtrn(), paymentFinalResponse.getTransactionStatus().toUpperCase().equalsIgnoreCase(OtherInbConstants.FAILURE_CONST) ? OtherInbConstants.FAILED : paymentFinalResponse.getTransactionStatus().toUpperCase());
+        RedirectView redirectView = new RedirectView();
+        redirectView.setUrl((otherInbConfigDetails.getMerchantResponseView()).concat(OtherInbConstants.MERCHANT_FINAL_RESPONSE).concat(Base64.getEncoder().encodeToString(paymentCallbackForwardService.processCallbackResponse(paymentFinalResponse, transactionDto, orderDao.getOrderDetails(transactionDto)).getBytes())));
+        return redirectView;
+    }
+
+    public PaymentFinalResponse processDhanalaxmiCallBack(String webResponse) throws InvalidAlgorithmParameterException, IllegalBlockSizeException, NoSuchPaddingException, BadPaddingException, NoSuchAlgorithmException, InvalidKeyException {
+        // Decrypt Web response
+        String decryptedWebResponse = Optional.of(DhanaLaxmiRetailCorpEncryptionDecryptionUtil.decryptDhanalaxmiRetail(webResponse.replaceAll(OtherInbConstants.NEW_LINE_REGEX, OtherInbConstants.PATTERN_EMPTY).replace(OtherInbConstants.PATTERN_SPACE, OtherInbConstants.PATTERN_EMPTY), "0620c6bca96baa252190504dfd568b8c0a2d146f8ebdb2577bba6f9500f0af84", "add84f1e3b6a74e8609fcdbc")).filter(x -> !x.isEmpty()).orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.DHANALAXMI_WEB_RESPONSE_ERROR_CODE, ErrorConstants.DHANALAXMI_WEB_RESPONSE_ERROR_MESSAGE));
+        logger.info("Payment Callback Decrypted Web Response {} ", decryptedWebResponse);
+        otherInbpaymentValidator.validateDhanalaxmiWebResponse(dhanaLaxmiRetailCorpEncryptionDecryptionUtil.getDecryptedData(decryptedWebResponse));
+        // Create web response DTO.
+        DhanalaxmiResponseDto dhanalaxmiMapWebResponseDto = Optional.ofNullable(new ObjectMapper().convertValue(DhanaLaxmiRetailCorpEncryptionDecryptionUtil.decryptDhanalaxmiRetail(decryptedWebResponse, "", ""), DhanalaxmiResponseDto.class)).orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.DHANALAXMI_WEB_RESPONSE_ERROR_CODE, ErrorConstants.DHANALAXMI_WEB_RESPONSE_ERROR_MESSAGE));
+        logger.info("Payment Callback Decrypted Web Response dhanalaxmiMapWebResponseDto {} ", dhanalaxmiMapWebResponseDto);
+        // Save Web response in DB
+        //  paymentDao.saveResponseLog(decryptedWebResponse, dhanalaxmiMapWebResponseDto.getOrderid(), dhanalaxmiMapWebResponseDto.getRefid(), OtherInbConstants.WEB_RESPONSE_TYPE, OtherInbConstants.CREATED_BY_DHANALAXMI);
+        if (!dhanalaxmiMapWebResponseDto.getPaId().equalsIgnoreCase(OtherInbConstants.DHANALAXMI_STATUS_SUCCESS_CONST)) {
+            //   statusUpdatePaymentDao.paymentFailureStatusUpdate(dhanalaxmiMapWebResponseDto.getOrderid(), dhanalaxmiMapWebResponseDto.getRefid(), dhanalaxmiMapWebResponseDto.getStatusmessage(), OtherInbConstants.DHANALAXMI_BANKING_RESPONSE);
+            return getRedirectObject(dhanalaxmiMapWebResponseDto);
+        }
+        // Check Web Checksum with created checksum.
+        validateWebResponseCheckSum(dhanalaxmiMapWebResponseDto);
+        // Validated PaymentResponse for Dhanalaxmi
+        DhanalaxmiResponseDto callBackResponse = mapCallBackResponse(dhanalaxmiMapWebResponseDto);
+        otherInbpaymentValidator.validateDhanalaxmicallBack(callBackResponse);
+        // atrn txn status is BOOKED and payment status is PAYMENT_INITIATION_START / amount Validation
+        dhanalaxmiDvinitiationProcess(callBackResponse);
+        //Redirecting to Browser.
+        return getRedirectObject(dhanalaxmiMapWebResponseDto);
+    }
+
+    public PaymentFinalResponse dhanalaxmiDvinitiationProcess(DhanalaxmiResponseDto dhanalaxmiResponseDto) throws InvalidAlgorithmParameterException, IllegalBlockSizeException, NoSuchPaddingException, BadPaddingException, NoSuchAlgorithmException, InvalidKeyException {
+        transactionDao.getValidPaymentAckReq(dhanalaxmiResponseDto.getAtrn(), PaymentStatus.BOOKED.toString(), OtherInbConstants.DHANALAXMI_CONST);
+
+        switch (dhanalaxmiResponseDto.getPaId()) {
+            case OtherInbConstants.DHANALAXMI_STATUS_SUCCESS_CONST -> {
+                String dvRequestString = dhanaLaxmiRetailCorpEncryptionDecryptionUtil.processDhanalaxmiDoubleVerRequest1(dhanalaxmiResponseDto);
+                logger.info("Payment Callback Plain DV Request for Dhanalaxmi {} ", dvRequestString);
+                String DhanalaxmiResponse = dhanalaxmiPaymentWebClientService.processingDoubleVerRequest(dvRequestString);
+                logger.info("Payment Callback Plain DV Response for Dhanalaxmi {} ", DhanalaxmiResponse);
+                String decryptedDVResponse = URLDecoder.decode(DhanaLaxmiRetailCorpEncryptionDecryptionUtil.decryptDhanalaxmiRetail(DhanalaxmiResponse.trim().replaceAll(OtherInbConstants.NEW_LINE_REGEX, OtherInbConstants.PATTERN_EMPTY).replace(OtherInbConstants.PATTERN_SPACE, OtherInbConstants.PATTERN_EMPTY), "0620c6bca96baa252190504dfd568b8c0a2d146f8ebdb2577bba6f9500f0af84", "add84f1e3b6a74e8609fcdbc"), StandardCharsets.UTF_8);
+                logger.info("Payment Callback Decrypted and Decode Double Verification Response {} ", decryptedDVResponse);
+                DhanalaxmiDvResponseDto dhanalaxmimapDVResponseDto = convertDvResponsetoDto(decryptedDVResponse);
+                if (!dhanalaxmimapDVResponseDto.getPrn().equalsIgnoreCase(OtherInbConstants.DHANALAXMI_STATUS_SUCCESS_CONST)) {
+//                    statusUpdatePaymentDao.paymentFailureStatusUpdate(dhanalaxmiResponseDto.getPrn(), dhanalaxmiResponseDto.getBId(), dhanalaxmiResponseDto.getStatusmessage(), OtherInbConstants.DHANALAXMI_BANKING_RESPONSE);
+                    DhanalaxmiResponseDto MapWebResponseDto = DhanalaxmiResponseDto.builder().paId(dhanalaxmimapDVResponseDto.getPaId()).paId(dhanalaxmimapDVResponseDto.getPaId()).atrn(dhanalaxmimapDVResponseDto.getPrn()).build();
+                    return getRedirectObject(MapWebResponseDto);
+                }
+                logger.info("Payment Callback dhanalaxmimapDVResponseDto@@@@@@ for Dhanalaxmi {} ", dhanalaxmimapDVResponseDto);
+                validateCallBackResponse(dhanalaxmiResponseDto, dhanalaxmimapDVResponseDto); // Check Method...
+                DhanalaxmiDvResponseDto dhanalaxmiDvResponseDto = dhanaLaxmiRetailCorpEncryptionDecryptionUtil.processDhanalaxmiDoubleVerRequest(dhanalaxmiResponseDto);
+                logger.info("Payment Callback DhanalaxmiDvResponseDto for Dhanalaxmi {} ", dhanalaxmiDvResponseDto);
+            }
+            default -> {
+//                statusUpdatePaymentDao.paymentFailureStatusUpdate(dhanalaxmiResponseDto.getOrderid(), dhanalaxmiResponseDto.getRefid(), dhanalaxmiResponseDto.getStatusmessage(), OtherInbConstants.DHANALAXMI_BANKING_RESPONSE);
+                return getRedirectObject(dhanalaxmiResponseDto);
+            }
+        }
+        return getRedirectObject(dhanalaxmiResponseDto);
+    }
+
+
+    public PaymentFinalResponse getRedirectObject(DhanalaxmiResponseDto dhanalaxmiResponseDto) {
+        logger.info("Payment Callback DhanalaxmiDvResponseDto######## for Dhanalaxmi atrn : {} status : {} paymodecode : {} ", dhanalaxmiResponseDto.getAtrn(), dhanalaxmiResponseDto.getPaId().equalsIgnoreCase(OtherInbConstants.ZERO) ? OtherInbConstants.SUCCESS : OtherInbConstants.FAILED, OtherInbConstants.DHANALAXMI_CONST);
+        TransactionDto transactionDto = transactionDao.getTransactionDetails(dhanalaxmiResponseDto.getAtrn());
+        logger.info("Payment Callback DhanalaxmiDvResponseDto######## for Dhanalaxmi {} ", transactionDto);
+        Order order = orderDao.getOrderDetails(transactionDto);
+        FinalResponseStatus finalResponseStatus = getStatus(transactionDto, order, dhanalaxmiResponseDto.getPaId() == null ? OtherInbConstants.EMPTY : dhanalaxmiResponseDto.getPaId().equalsIgnoreCase(OtherInbConstants.ZERO) ? OtherInbConstants.SUCCESS : OtherInbConstants.FAILED, dhanalaxmiResponseDto.getPaId() == null ? OtherInbConstants.EMPTY : dhanalaxmiResponseDto.getPaId());
+        return PaymentFinalResponse.builder().mId(transactionDto.getMerchantId() == null ? OtherInbConstants.EMPTY : transactionDto.getMerchantId()).merchantOrderNumber(transactionDto.getOrderRefNumber() == null ? OtherInbConstants.EMPTY : transactionDto.getOrderRefNumber()).sbiOrderId(transactionDto.getSbiOrderRefNumber() == null ? OtherInbConstants.EMPTY : transactionDto.getSbiOrderRefNumber()).orderAmount(String.valueOf(transactionDto.getOrderAmount() == null ? OtherInbConstants.EMPTY : String.valueOf(transactionDto.getOrderAmount()))).totalAmount(String.valueOf(transactionDto.getDebitAmt()) == null ? OtherInbConstants.EMPTY : String.valueOf(transactionDto.getDebitAmt())).atrn(transactionDto.getAtrnNum() == null ? OtherInbConstants.EMPTY : transactionDto.getAtrnNum()).transactionStatus(finalResponseStatus.getStatus()).reason(finalResponseStatus.getResponseReason()).CIN(transactionDto.getCin() == null ? OtherInbConstants.EMPTY : transactionDto.getCin()).otherDetails(order.getOtherDetails() == null ? OtherInbConstants.EMPTY : order.getOtherDetails()).bankName(transactionDto.getChannelBank() == null ? OtherInbConstants.EMPTY : transactionDto.getChannelBank()).bankTxnNumber(dhanalaxmiResponseDto.getTId() == null ? OtherInbConstants.EMPTY : dhanalaxmiResponseDto.getTId()).bankCode(transactionDto.getPayMode() == null ? OtherInbConstants.EMPTY : transactionDto.getPayMode()).customerId(order.getCustomerId() == null ? OtherInbConstants.EMPTY : order.getCustomerId()).orderRetryCount(String.valueOf(order.getOrderRetryCount()) == null ? OtherInbConstants.EMPTY : String.valueOf(order.getOrderRetryCount())).build();
+    }
+
+    public FinalResponseStatus getStatus(TransactionDto transactionDto, Order order, String channelStatus, String failureReason) {
+        if (!transactionDto.getOrderAmount().equals(order.getOrderAmount())) {
+            return FinalResponseStatus.builder().status(OtherInbConstants.FAILED).responseReason(OtherInbConstants.FAILED_FOR_AMOUNT_NOT_MATCHED).build();
+        } else {
+            return FinalResponseStatus.builder().status(channelStatus).responseReason(failureReason.replaceAll(OtherInbConstants.SPECIAL_CHAR_REGEX, OtherInbConstants.EMPTY)).build();
+        }
+    }
+
+
+    public DhanalaxmiResponseDto mapCallBackResponse(DhanalaxmiResponseDto dhanalaxmiResponseDto) {
+        return DhanalaxmiResponseDto.builder().atrn(dhanalaxmiResponseDto.getAtrn()).amount(dhanalaxmiResponseDto.getAmount()).atrn(dhanalaxmiResponseDto.getAtrn()).paId(dhanalaxmiResponseDto.getPaId()).paId(dhanalaxmiResponseDto.getPaId()).paId(dhanalaxmiResponseDto.getPaId()).build();
+    }
+
+
+    public PaymentFinalResponse validateWebResponseCheckSum(DhanalaxmiResponseDto dhanalaxmiResponseDto) {
+
+        String webResData = Arrays.stream(MessageFormat.format(OtherInbConstants.DHANALAXMI_WEB_CHECKSUM, dhanalaxmiResponseDto.getPaId(), dhanalaxmiResponseDto.getPaId(), dhanaLaxmiRetailCorpEncryptionDecryptionUtil.formatedAmount(dhanalaxmiResponseDto.getAmount()), dhanalaxmiResponseDto.getPaId(), dhanalaxmiResponseDto.getTId()).split("\\|")).map(String::trim).map(s -> "'" + s + "'").collect(Collectors.joining());
+        logger.info("Payment Initiation using builder webResData {} for Dhanalaxmi : ", webResData);
+
+        if (!otherInbpaymentValidator.checkSum(dhanalaxmiResponseDto.getChecksum(), (DhanaLaxmiRetailCorpEncryptionDecryptionUtil.checkSumDhanalaxmiRetail(webResData)))) {
+//            statusUpdatePaymentDao.paymentFailureStatusUpdate(dhanalaxmiResponseDto.getOrderid(), dhanalaxmiResponseDto.getRefid(),ErrorConstant.WEB_CHECKSUM_MISMATCH_ERROR_MESSAGE, OtherInbConstants.DHANALAXMI_BANKING_RESPONSE);
+            return getRedirectObject(dhanalaxmiResponseDto);
+        }
+        return null;
+    }
+
+
+    private PaymentFinalResponse validateCallBackResponse(DhanalaxmiResponseDto dhanalaxmiResponseDto, DhanalaxmiDvResponseDto dhanalaxmiDVResponseDto) {
+        //Amount conversion for checksum
+        String dvResData = Arrays.stream(MessageFormat.format(OtherInbConstants.DHANALAXMI_WEB_CHECKSUM, dhanalaxmiDVResponseDto.getPaId(), dhanalaxmiDVResponseDto.getPrn(), dhanalaxmiDVResponseDto.getBId(), dhanaLaxmiRetailCorpEncryptionDecryptionUtil.formatedAmount(dhanalaxmiDVResponseDto.getAmount()), dhanalaxmiDVResponseDto.getPaId(), dhanalaxmiDVResponseDto.getPrn()).split("\\|")).map(String::trim).map(s -> "'" + s + "'").collect(Collectors.joining());
+        logger.info("Payment Initiation using builder webResData {} for Dhanalaxmi : ", dvResData);
+
+        logger.info("Payment Callback DV create Checksum {} ", DhanaLaxmiRetailCorpEncryptionDecryptionUtil.checkSumDhanalaxmiRetail(dvResData));
+        if (!otherInbpaymentValidator.checkSum(String.valueOf(dhanalaxmiDVResponseDto.hashCode()), (DhanaLaxmiRetailCorpEncryptionDecryptionUtil.checkSumDhanalaxmiRetail(dvResData)))) {
+            //     statusUpdatePaymentDao.paymentFailureStatusUpdate(dhanalaxmiResponseDto.getOrderid(), dhanalaxmiResponseDto.getRefid(),ErrorConstant.DV_CHECKSUM_MISMATCH_ERROR_MESSAGE, OtherInbConstants.DHANALAXMI_BANKING_RESPONSE);
+            return getRedirectObject(dhanalaxmiResponseDto);
+        }
+        if (!otherInbpaymentValidator.validateWebAndDvAmt(dhanalaxmiResponseDto.getAmount(), dhanalaxmiDVResponseDto.getAmount())) {
+//            statusUpdatePaymentDao.paymentFailureStatusUpdate(dhanalaxmiResponseDto.getOrderid(), dhanalaxmiResponseDto.getRefid(),ErrorConstant.AMOUNT_ERROR_MESSAGE, OtherInbConstants.DHANALAXMI_BANKING_RESPONSE);
+            return getRedirectObject(dhanalaxmiResponseDto);
+        }
+        if (!otherInbpaymentValidator.ValidateBankReferenceNumber(dhanalaxmiResponseDto.getAtrn(), dhanalaxmiDVResponseDto.getBId())) {
+//            statusUpdatePaymentDao.paymentFailureStatusUpdate(dhanalaxmiResponseDto.getOrderid(), dhanalaxmiResponseDto.getRefid(),ErrorConstant.BANK_REF_NO_ERROR_MESSAGE, OtherInbConstants.DHANALAXMI_BANKING_RESPONSE);
+            return getRedirectObject(dhanalaxmiResponseDto);
+        }
+        return null;
+    }
+
+
+    public DhanalaxmiDvResponseDto convertDvResponsetoDto(String dhanalaxmiDvResponse) {
+        logger.info("Payment Callback MapDVResponseDto for Dhanalaxmi {} ", dhanalaxmiDvResponse);
+        try {
+            return new ObjectMapper().readValue(dhanalaxmiDvResponse, DhanalaxmiDvResponseDto.class);
+
+        } catch (JsonProcessingException e) {
+            throw new OtherInbPaymentException(ErrorConstants.DHANALAXMI_DV_RESPONSE_PROCESS_ERROR_CODE, ErrorConstants.DHANALAXMI_DV_RESPONSE_PROCESS_MESSAGE);
+        }
+
+    }
+}
+
+// ==========================================================================
+//  DhanalaxmiPaymentWebClientService
+// ==========================================================================
+
+
+@RequiredArgsConstructor
+@Component
+public class DhanalaxmiPaymentWebClientService {
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+    private final OtherInbConfigDetails otherInbConfigDetails;
+    private final DhanaLaxmiRetailCorpEncryptionDecryptionUtil dhanaLaxmiRetailCorpEncryptionDecryptionUtil;
+
+
+    public String processingDoubleVerRequest(String plainDvRequestAndChecksum) {
+
+        try {
+
+            String encryptedDVData = DhanaLaxmiRetailCorpEncryptionDecryptionUtil.encryptDhanalaxmiRetail(plainDvRequestAndChecksum, "0620c6bca96baa252190504dfd568b8c0a2d146f8ebdb2577bba6f9500f0af84", "add84f1e3b6a74e8609fcdbc");
+            logger.info("Payment Callback Encrypted and Encoded Double Verification {} " + encryptedDVData);
+
+
+            String DVResponse = Optional.ofNullable(DhanalaxmiDVResponseConn(otherInbConfigDetails.getMerchantResponseView(), (OtherInbConstants.DHANALAXMI_MERCH_CODE_CONST_URL).concat("mid").concat(OtherInbConstants.DHANALAXMI_ENC_DATA).concat(encryptedDVData))).filter(x -> !x.isEmpty()).orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.DOUBLE_VERIFICATION_ERROR_CODE, ErrorConstants.DOUBLE_VERIFICATION_ERROR_MESSAGE));
+            logger.info("Payment Callback Encrypted Double Verification Response {} ", DVResponse);
+
+//            String decryptedDVResponse = URLDecoder.decode(DhanaUtil.decrypt(DVResponse.trim().replaceAll(PaymentConstants.NEW_LINE_REGEX, PaymentConstants.PATTERN_EMPTY).replace(PaymentConstants.PATTERN_SPACE, PaymentConstants.PATTERN_EMPTY), otherInbConfigDetails.getEncryptionKey()), StandardCharsets.UTF_8);
+//            logger.info("Payment Callback Decrypted and Decode Double Verification Response {} ", decryptedDVResponse);
+            //       return decryptedDVResponse;
+            return DVResponse;
+        } catch (Exception e) { // Exception throw by INB Bank Algorithm
+            logger.error("Exception While processingDoubleVerRequest  {}", e);
+            throw new OtherInbPaymentException(ErrorConstants.DOUBLE_VERIFICATION_ERROR_CODE, ErrorConstants.DOUBLE_VERIFICATION_ERROR_MESSAGE);
+        }
+    }
+
+    public String DhanalaxmiDVResponseConn(String bankdvurl, String encryptedData) {
+        logger.info("Dhanalaxmi DV Request posting parameters DV Url {} and encryptedData {} ", bankdvurl + encryptedData);
+        LoggerUtility logger = LoggerFactoryUtility.getLogger(DhanalaxmiPaymentWebClientService.class);
+
+        logger.info("Other INB DV Request posting parameters DV Url {} and encryptedData {} ", bankdvurl, encryptedData);
+        try {
+
+            WebClient webClient = WebClient.builder().baseUrl(bankdvurl).build();
+            logger.info("webClient URL for other INB {} ", webClient);
+
+
+            return webClient.post().header(OtherInbConstants.REQUESTPROPERTY, OtherInbConstants.URL_ENCODED_CONTENT_TYPE).bodyValue(encryptedData).retrieve().onStatus(status -> {
+                logger.info("DV Response received status for other INB {} ", status);
+                return !status.is2xxSuccessful();
+            }, clientResponse -> clientResponse.bodyToMono(String.class).flatMap(errorBody -> Mono.error(((Supplier<RuntimeException>) () -> new OtherInbPaymentException(ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE, MessageFormat.format(ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE, OtherInbConstants.SBI_INB_SERVICE))).get()))).bodyToMono(String.class).doOnNext(body -> {
+                logger.info("responseCode for other INB {} ", body);
+            }).doOnError(error -> {
+                logger.info("error responseCode for other INB {} ", error);
+            }).onErrorResume(error -> {
+                logger.info("error responseCode for other INB {} ", error);
+                return Mono.error(() -> new OtherInbPaymentException(ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE, MessageFormat.format(ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE, OtherInbConstants.OTHER_INB_SERVICE)));
+            }).retryWhen(Retry.fixedDelay(3, Duration.ofSeconds(1)).filter(throwable -> throwable instanceof OtherInbPaymentException).doBeforeRetry(retrySignal -> logger.info("Retrying attempt {} due to error: {}", retrySignal.totalRetries() + 1, retrySignal.failure().getMessage()))).block();
+        } catch (Exception e) { // Exception throw by INB Bank Algorithm
+            logger.error("Exception While otherINBDVResponseConn  {}", e);
+            throw new OtherInbPaymentException(ErrorConstants.EXTERNAL_SERVICE_ERROR_CODE, MessageFormat.format(ErrorConstants.EXTERNAL_SERVICE_ERROR_MESSAGE, OtherInbConstants.OTHER_INB_SERVICE));
+        }
+    }
+}
+
+
+// ==========================================================================
+//  DhanaLaxmiRetailCorpEncryptionDecryptionUtil
+// ==========================================================================
+
+
+@Component("DhanaLaxmiRetailCorpEncryptionDecryptionUtil")
+@RequiredArgsConstructor
+public class DhanaLaxmiRetailCorpEncryptionDecryptionUtil {
+    private final OtherInbPaymentDao otherInbPaymentDao;
+    private final OtherInbFormPostingUtil otherInbFormPostingUtil;
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+
+    public static String encryptDhanalaxmiRetail(String plaintext, String hexKey, String hexIv) throws Exception {
+        byte[] keyBytes = hexToBytes(hexKey);
+        byte[] ivBytes = hexToBytes(hexIv);
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        GCMParameterSpec spec = new GCMParameterSpec(128, ivBytes);//Authentication Tag Length (128)
+        SecretKeySpec keySpec = new SecretKeySpec(keyBytes, "AES");
+        cipher.init(Cipher.ENCRYPT_MODE, keySpec, spec);
+        byte[] ciphertext = cipher.doFinal(plaintext.getBytes());
+        return bytesToBase64(ciphertext);
+
+    }
+
+    public static String decryptDhanalaxmiRetail(String cipherText, String hexKey, String hexIv) throws InvalidAlgorithmParameterException, InvalidKeyException, IllegalBlockSizeException, BadPaddingException, NoSuchPaddingException, NoSuchAlgorithmException {
+        byte[] keyBytes = hexToBytes(hexKey);
+        byte[] ivBytes = hexToBytes(hexIv);
+        byte[] cipherBytes = Base64.getDecoder().decode(cipherText);
+        System.out.println("Key length: " + keyBytes.length);
+        System.out.println("IV length: " + ivBytes.length);
+        System.out.println("Cipher length: " + cipherBytes.length);
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        GCMParameterSpec spec = new GCMParameterSpec(128, ivBytes);
+        SecretKeySpec keySpec = new SecretKeySpec(keyBytes, "AES");
+
+        cipher.init(Cipher.DECRYPT_MODE, keySpec, spec);
+
+
+        byte[] decrypted = cipher.doFinal(cipherBytes);
+
+        return new String(decrypted, StandardCharsets.UTF_8);
+    }
+
+    public static byte[] hexToBytes(String hex) {
+        int len = hex.length();
+        byte[] data = new byte[len / 2];
+        for (int i = 0; i < len; i += 2) {
+            data[i / 2] = (byte) ((Character.digit(hex.charAt(i), 16) << 4) + Character.digit(hex.charAt(i + 1), 16));
+        }
+        return data;
+    }
+
+    public static String checkSumDhanalaxmiRetail(String hashSrc) {
+        MessageDigest md = null;
+
+        try {
+            md = MessageDigest.getInstance("SHA-512");
+        } catch (NoSuchAlgorithmException var5) {
+            NoSuchAlgorithmException e = var5;
+            e.printStackTrace();
+        }
+
+        md.update(hashSrc.getBytes());
+        byte[] byteData = md.digest();
+        StringBuffer sb = new StringBuffer();
+
+        for (int i = 0; i < byteData.length; ++i) {
+            sb.append(Integer.toString((byteData[i] & 255) + 512, 16).substring(1));
+        }
+
+        return sb.toString();
+    }
+
+    public static String bytesToBase64(byte[] bytes) {
+        return java.util.Base64.getEncoder().encodeToString(bytes);
+    }
+
+    // WEB REQUEST INITIATION METHOD FOR DHANALAXMI BANK
+    public OtherInbPostingData processInitiate(PaymentRequest paymentWebRequest, TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto) throws Exception {
+        DateTimeFormatter dateTime = DateTimeFormatter.ofPattern(OtherInbConstants.TXN_DATETIME_FORMAT); // dd/MM/YYYY HH:mm:ss
+        String txnDateTime = LocalDateTime.now().format(dateTime);
+        logger.info("dateTimeString. {} for DHANALAXMI Bank ", txnDateTime);
+
+        //Step 1 Plain text checksum request
+        String checkSumVal = createChecksum(transactionDto, otherInbChannelUnitMappingDto, txnDateTime);
+        logger.info("checkSumVal. {} for DHANALAXMI Bank ", checkSumVal);
+
+        //Step 2 Plain text web request + Checksum from step 1
+        String planeTextWebReqData = createWebRequest(transactionDto, otherInbChannelUnitMappingDto, checkSumVal, txnDateTime);
+        logger.info("planeTextWebReqData. {} for  DHANALAXMI Bank ", planeTextWebReqData);
+        otherInbPaymentDao.saveRequestLog(planeTextWebReqData, paymentWebRequest.getAtrn(), OtherInbConstants.WEB_REQUEST_TYPE, OtherInbConstants.CREATED_BY_DHANALAXMI);
+        otherInbPaymentDao.saveRequestLog(planeTextWebReqData, paymentWebRequest.getAtrn(), OtherInbConstants.WEB_REQUEST_TYPE, OtherInbConstants.CREATED_BY_DHANALAXMI);
+        return OtherInbPostingData.builder().atrn(transactionDto.getAtrnNum()).merchIdVal(transactionDto.getMerchantId()).encryptTrans(otherInbFormPostingUtil.getFormPostingData(otherInbFormPostingUtil.getForm_Dhanlaxmi(encryptedPostedData(planeTextWebReqData, otherInbChannelUnitMappingDto, transactionDto).getData(), transactionDto, otherInbChannelUnitMappingDto), otherInbChannelUnitMappingDto, transactionDto)).build();
+    }
+
+    // WEB CHECKSUM CREATION METHOD
+    public String createChecksum(TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto, String txnDateTime) throws Exception {
+        StringBuilder checkVal = new StringBuilder();
+        return checkSumDhanalaxmiRetail(checkVal.append(MessageFormat.format(otherInbChannelUnitMappingDto.getChecksumValue(), 0, transactionDto.getAtrnNum(), txnDateTime, transactionDto.getDebitAmt(), "RU")).toString());
+    }
+
+    // WEB REQUEST CREATION METHOD
+    public String createWebRequest(TransactionDto transactionDto, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto, String checkSumVal, String txnDateTime) {
+        return MessageFormat.format(String.valueOf(otherInbChannelUnitMappingDto.getWebRequestFormat()), "PGREFID", transactionDto.getAtrnNum(), transactionDto.getDebitAmt(), "RU", "BSNLRecharge", "1234567890");
+    }
+
+    public PostingData encryptedPostedData(String planeTextWebReqData, OtherInbChannelUnitMappingDto otherInbChannelUnitMappingDto, TransactionDto transactionDto) throws Exception {
+        String encWebReqData = encryptDhanalaxmiRetail(planeTextWebReqData, "0620c6bca96baa252190504dfd568b8c0a2d146f8ebdb2577bba6f9500f0af84", "add84f1e3b6a74e8609fcdbc");
+        return PostingData.builder().data(planeTextWebReqData).atrn(transactionDto.getAtrnNum()).build();
+    }
+
+    public Map<String, String> getDecryptedData(String decResponse) {
+        return Optional.of(Arrays.stream(decResponse.split("\\|")).map(kv -> kv.split(OtherInbConstants.PATTERN_EQUAL_TO_CONST)).filter(kvArray -> kvArray.length > 1).collect(Collectors.toMap(kv -> kv[0], kv -> StringUtils.isBlank(kv[1]) ? OtherInbConstants.NA : kv[1].trim()))).orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.WEB_CHECKSUM_ERROR_CODE, ErrorConstants.WEB_CHECKSUM_MISMATCH_ERROR_MESSAGE));
+    }
+
+    public String getDvRespDecryptedData(String encryptedData) throws Exception {
+        String decryptedWebResponse = decryptDhanalaxmiRetail(encryptedData, "0620c6bca96baa252190504dfd568b8c0a2d146f8ebdb2577bba6f9500f0af84", "add84f1e3b6a74e8609fcdbc");
+        return decryptedWebResponse;
+
+    }
+
+    public String formatedAmount(BigDecimal amount) {
+        BigDecimal convertedAmount = amount.setScale(2, BigDecimal.ROUND_UP);
+        DecimalFormat df = new DecimalFormat("0.00");
+        return df.format(convertedAmount);
+    }
+
+
+    public DhanalaxmiDvResponseDto processDhanalaxmiDoubleVerRequest(DhanalaxmiResponseDto dhanalaxmiResponseDto) {
+        //Save DV Response in DB
+//        paymentDao.saveResponseLog(decryptedDVResponse, dhanalaxmiDvResponseDto.getOrderid(), walletDVResponseDto.getTxid(), PaymentConstants.DV_RESPONSE_TYPE, PaymentConstants.CREATED_BY_WALLET);
+//        // Validation call checksum, bank ref number, amount
+//        //    validateCallBackResponse(walletMapWebResponseDto, walletDVResponseDto); // Check Method...
+        DhanalaxmiDvResponseDto dto = new DhanalaxmiDvResponseDto();
+//        //in web or dv response trace no is null or zero then mark txn as fail.
+//        switch (walletDVResponseDto.getStatuscode()) {
+//            case PaymentConstants.WALLET_STATUS_SUCCESS_CONST -> {
+//                logger.info("Payment Callback DV WALLET SUCCESS_CONST {} " , walletDVResponseDto);
+//                statusUpdatePaymentDao.paymentSuccessPendingStatusUpdateGen(PaymentStatus.SUCCESS.toString(), walletDVResponseDto.getOrderid(),  walletDVResponseDto.getTxid(),PaymentConstants.WALLET_MOBIKWIK_RESPONSE,PaymentConstants.WALLET_CONST);
+//                return walletDVResponseDto;
+//            }
+//            case PaymentConstants.FAILURE_CONST -> {
+//                logger.info("Payment Callback DV WALLET FAILURE_CONST {} " , walletDVResponseDto);
+//                statusUpdatePaymentDao.paymentFailureStatusUpdate(walletDVResponseDto.getOrderid(),walletDVResponseDto.getTxid(),walletDVResponseDto.getStatuscode(),PaymentConstants.WALLET_MOBIKWIK_RESPONSE);
+//                return walletDVResponseDto;
+//            }
+//            default -> {
+//                logger.info("Payment Callback DV WALLET default {} " , walletDVResponseDto);
+//                statusUpdatePaymentDao.paymentFailureStatusUpdate(walletDVResponseDto.getOrderid(),walletDVResponseDto.getTxid(),walletDVResponseDto.getStatusmessage(),PaymentConstants.WALLET_MOBIKWIK_RESPONSE);
+        return dto;
+    }
+
+    public String getCallBackResponse(String mid, String orderid) {
+
+//        // Create checksum
+//        String dvReqData= Arrays.stream(MessageFormat.format(OtherInbConstants.MOBIKWIK_URL_VALUE_DV_REQUEST_CHECKSUM,mid,orderid)
+//                .split("\\|")).map(String :: trim).map(s -> "'"+s +"'").collect(Collectors.joining());
+//        String createCheckSum= DhanlaxmiRetailUtil.checkSumDhanalaxmiRetail(dvReqData,walletConfig.getSecretKey());
+//        logger.info("Payment Initiation using builder DV: {} createCheckSum: {} atrn: {} for Wallet MobikWik : ", dvReqData,createCheckSum,orderid);
+//        //Create plainText Request String
+//        String plainDvRequestAndChecksum = (MessageFormat.format(OtherInbConstants.MOBIKWIK_URL_VALUE_DV_REQUEST_encrypted,orderid,createCheckSum));
+//        logger.info("Payment Callback Plain Double Verification Request and Checksum {} " + plainDvRequestAndChecksum);
+//        // Save DV Request...
+//        paymentDao.saveRequestLog(plainDvRequestAndChecksum,orderid,OtherInbConstants.DV_REQUEST_TYPE,OtherInbConstants.CREATED_BY_WALLET);
+        return "plainDvRequestAndChecksum";
+
+    }
+
+    public String processDhanalaxmiDoubleVerRequest1(DhanalaxmiResponseDto MapWebResponseDto) {
+
+        return "ddf";
+        //getCallBackResponse(MapWebResponseDto.getMid(),walletMapWebResponseDto.getOrderid());
+
+
+    }
+}
+
+// ==========================================================================
+//  OtherInbConfigDetails
+// ==========================================================================
+
+
+@Data
+@Configuration
+public class OtherInbConfigDetails {
+
+    @Value("${https_protocols}")
+    private String https_protocols;
+
+    @Value("${https_proxySet}")
+    private String https_proxySet;
+
+    @Value("${https_proxyHost}")
+    private String https_proxyHost;
+
+    @Value("${https_proxyPort}")
+    private String https_proxyPort;
+
+    @Value("${wibmo.proxy.required}")
+    private String proxyRequired;
+
+    @Value("${security.cors.origin}")
+    private String corsOrigin;
+
+    @Value("${external.api.ui.service.redirectView}")
+    private String merchantResponseView;
+
+    @Value("${key.aek}")
+    private String aek;
+
+    @Value("${external.api.ui.service.redirectView}")
+    private String CbiOINBurl;
+
+    @Value("${external.api.ui.service.redirectView}")
+    private String AxisOINBurl;
+
+    @Value("${external.api.ui.service.redirectView}")
+    private String dhanalaxmiDvUrl;
+
+    @Value("${external.api.ui.service.redirectView}")
+    private String SaraswatOINBurl;
+
+    // ESAf
+    @Value("${epay.other.inb.esaf.tokenURL}")
+    private String esafTokenURL;
+
+    @Value("${epay.other.inb.esaf.dvURL}")
+    private String esafDVURL;
+
+    @Value("${external.api.ui.service.redirectView}")
+    private String PSBOINBurl;
+
+}
+// ==========================================================================
+//  OrderDao
+// ==========================================================================
+@Component
+@RequiredArgsConstructor
+public class OrderDao {
+
+    private final OrderRepository orderRepository;
+    private final LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+
+    public Order getOrderDetails(TransactionDto transactionDto) {
+
+        return orderRepository.findBySbiOrderRefNumberAndOrderRefNumber(transactionDto.getSbiOrderRefNumber(), transactionDto.getOrderRefNumber())
+                .orElseThrow(() -> new OtherInbPaymentException(ErrorConstants.NOT_FOUND_ERROR_CODE, MessageFormat
+                        .format(ErrorConstants.NOT_FOUND_ERROR_MESSAGE, "Order")));
+    }
+}
+
+// ==========================================================================
+//  OtherINBPaymentCallBackController
+// ==========================================================================
+
+
+@RestController
+@RequiredArgsConstructor
+@Validated
+@Tag(name = OtherInbConstants.OTHER_INB_INITIATION_TAG_VALUE)
+@RequestMapping("/other-inb")
+public class OtherINBPaymentCallBackController {
+
+@PostMapping(value = "/callback/dhanalaxmi")
+    @Operation(summary = "Dhanalaxmi Other INB Web Response and Double Verification API", description = "This API is used for Capture Web Response and Double Verification call to Bank.")
+    public PaymentFinalResponse dhanalaxmiOINbWebResponse(@RequestParam(OtherInbConstants.ENC_DATA_KEY) String webResponse) throws Exception {
+        logger.info("Dhanalaxmi Other INB Payment callback controller start {} ", webResponse);
+        return dhanalaxmiPaymentService.processDhanalaxmiCallBack(webResponse);
+    }
+}
+
+// ==========================================================================
+//  DhanalaxmiDvResponseDto
+// ==========================================================================
+
+
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+@Builder
+public class DhanalaxmiDvResponseDto {
+    private String prn;
+    private String bId;
+    private String paId;
+    private BigDecimal amount;
+
+}
+// ==========================================================================
+//  DhanalaxmiResponseDto
+// ==========================================================================
+
+
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+@Builder
+public class DhanalaxmiResponseDto {
+    private String atrn;
+    private String tId;
+    private String paId;
+    private BigDecimal amount;
+    private String checksum;
+}
+
+// ==========================================================================
+//  DB column Name 
+// ==========================================================================
+
+
+ID
+GTW_MAP_ID
+PAY_MODE
+WEB_REQUEST_FORMAT
+WEB_RESPONSE_FORMAT
+VERI_REQUEST_FORMAT
+VERI_RESPONSE_FORMAT
+FROM_POSTING_FORMAT
+UNIT_TYPE
+UNIT_NAME
+ENC_METHOD_NAME
+DEC_METHOD_NAME
+CHANNEL_RETURN_URL
+CHECKSUM_METHOD_NAME
+CHECKSUM_TYPE
+CHECKSUM_VALUE
+COMMON_ENC_KEY
+COMMON_ENC_KEY_IV
+WEB_ENC_KEY
+WEB_ENC_KEYIV
+VERI_EN_CKEY
+VERI_ENC_KEY_IV
+CREATED_BY
+UPDATED_BY
+UPDATED_DATE
+CREATED_DATE
+STATUS
+REMARKS
+BANK_URL
+DV_URL
+TOKEN_URL
+FORM_POSTING_TEMPLATE
+FROM_POSTING_METHOD
+BANK_ROUTING_METHOD
+BANK_ROUTING_CLASS
+PAYMENT_REDIRECT_URL
+DV_CHECKSUM_VALUE
+
+we sotred data like this
+==========================
+571FF90B70AC933AE0637D86B10AF46D	35	NB	PID={0}&PRN={1}&AMT={2}&CRN=INR&RU={3}&MN={4}&ACTNO={5}	PRN={0}&BID={1}&PAID={2}&AMT={3}	PRN={0}&AMT={1}&CHECKSUM={2}	PRN={0}&BID={1}&PAID={2}&AMT={3}&ACCOUNTNO={4}&PAYDATE={5}&REMNAME={6}&PAYREFNO={7}&CHECKSUM={8}	No	PAYMENT		encryptDhanalaxmiRetail	decryptDhanalaxmiRetail		checkSumDhanalaxmiRetail	SHA-512	PRN={0}&AMT={1}							system	system	172333333333	172333333333	A	ok	https://ngib.dhanbank.in:8443/ib-retail-web/tenant/pgLogin			PGh0bWw+Cjxib2R5IG9ubG9hZD1kb2N1bWVudC5mb3Jtc1swXS5zdWJtaXQoKT4KPGZvcm0KbWV0aG9kPSIke01FVEhPRH0iCmFjdGlvbj0iJHtBQ1RJT05fVVJMfSI+CjwvZm9ybT4KPC9ib2R5Pgo8L2h0bWw+	POST	processInitiate	DhanaLaxmiRetailCorpEncryptionDecryptionUtil			
+
+
+
+
+
+=====================================================================================================================================================
+=====================================================================================================================================================
+=====================================================================================================================================================
+=====================================================================================================================================================
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Dhanalaxmi bank retail 
 ======================
 
