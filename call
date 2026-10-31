@@ -1,0 +1,2308 @@
+============================================================
+InbPaymentController.java
+============================================================
+@RestController
+@RequiredArgsConstructor
+@Validated
+@Tag(name = PaymentConstants.OTHER_INB_INITIATION_TAG_VALUE)
+@RequestMapping("/other-inb/sbi")
+public class OtherInbPaymentController {
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+    private final OtherInbService otherInbService;
+
+ @PostMapping(value = "/callback")
+    @Operation(summary = "SBI INB Web Response and Double Verification API",description = "This API is used for Capture Web Response and Double Verification call to Bank.")
+    public RedirectView sbiNbWebResponse(@RequestParam(PaymentConstants.ENC_DATA_KEY) String webResponse){
+        logger.info("SBI INB Payment callback controller start {} ", webResponse);
+        return inbPaymentService.processWebResponsePayload(webResponse);
+    }
+}
+
+============================================================
+InbPaymentService.java
+============================================================
+package com.epay.payment.service;
+
+import com.epay.payment.dao.*;
+import com.epay.payment.dto.NbMapWebResponseDto;
+import com.epay.payment.dto.TransactionDto;
+import com.epay.payment.entity.Order;
+import com.epay.payment.entity.PostingData;
+import com.epay.payment.exceptions.PaymentException;
+import com.epay.payment.externalservice.PaymentWebClientService;
+import com.epay.payment.model.request.PaymentInitiationRequest;
+import com.epay.payment.model.request.PaymentRequest;
+import com.epay.payment.model.response.FinalResponseStatus;
+import com.epay.payment.model.response.PaymentFinalResponse;
+import com.epay.payment.model.response.PaymentResponse;
+import com.epay.payment.util.InbEncryptionDecryptionUtil;
+import com.epay.payment.util.InbErrorConstants;
+import com.epay.payment.util.PaymentConstants;
+import com.epay.payment.util.PaymentUtil;
+import com.epay.payment.util.enums.PaymentStatus;
+import com.epay.payment.validator.PaymentInbValidator;
+import com.epay.payment.validator.PaymentValidator;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+import org.springframework.web.servlet.view.RedirectView;
+
+import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+@RequiredArgsConstructor
+@Service
+public class InbPaymentService {
+
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+    private final PaymentUtil paymentUtil;
+    private final TransactionDao transactionDao;
+    private final PaymentDao paymentDao;
+    private  final InbEncryptionDecryptionUtil inbEncryptionDecryptionUtil;
+    private final PaymentValidator paymentValidator;
+    private final NbPaymentDao nbPaymentDao;
+    private final StatusUpdatePaymentDao statusUpdatePaymentDao;
+    private final PaymentWebClientService paymentWebClientService;
+    private final OrderDao orderDao;
+    private final PaymentInbValidator paymentInbValidator;
+    private final PaymentCallbackForwardService paymentCallbackForwardService;
+    /**
+     * @return -JSON : PaymentResponse<PostingData> (1.postURL, 2.data, 3.Key, 4.merchantCode)
+     * @methodName: Generate Web Request Payload.
+     * @@Method-Description: The purpose of this method is to create web request and encrypt request.
+     * @param: generateReqPayload
+     * @Exception or @Error :Exception
+     */
+    public PaymentResponse<PostingData> generateReqPayload(PaymentRequest paymentWebRequest) {
+        PaymentInitiationRequest paymentInitiationRequest=getInitiationRequest(paymentWebRequest);
+        // Validated PaymentRequest for INB..
+        paymentInbValidator.validateNBRequest(paymentInitiationRequest);
+        logger.info("Payment Initiation Start for Atrn {} ", paymentWebRequest.getAtrn());
+        TransactionDto transactionDto = transactionDao.getValidPaymentAckReq(paymentWebRequest.getAtrn(), PaymentStatus.BOOKED.toString(),PaymentConstants.NB_CONST);
+        logger.info("Payment Initiation get atrn details {} ", transactionDto);
+        paymentValidator.validateDebitAmount(transactionDto.getDebitAmt());
+        String  planeTextWebReqData = paymentUtil.createWebRequest(paymentWebRequest.getAtrn(), transactionDto.getDebitAmt());
+        logger.info("Payment Initiation Plane Text Web Request {} , and ATRN {}", planeTextWebReqData,paymentWebRequest.getAtrn());
+        paymentDao.saveRequestLog(planeTextWebReqData,paymentWebRequest.getAtrn(), PaymentConstants.WEB_REQUEST_TYPE,PaymentConstants.CREATED_BY);
+        PostingData encryptedPostedData = inbEncryptionDecryptionUtil.encryptedPostedData(planeTextWebReqData,paymentWebRequest.getAtrn(),transactionDto.getGatewayIssueMECode());
+        logger.info("Payment Initiation Encrypted Web Request {} , and ATRN {}", encryptedPostedData.getData(),paymentWebRequest.getAtrn());
+        return PaymentResponse.<PostingData>builder().status(PaymentConstants.API_RESPONSE_STATUS_SUCCESS).data(List.of(encryptedPostedData)).build();
+    }
+
+    /**
+     * @return -JSON : PaymentFinalResponse
+     * @methodName: Process Web Response Payload.
+     * @@Method-Description: The purpose of this method is to Process Web Response Payload.
+     * @param: processWebResponsePayload
+     * @Exception or @Error :Exception
+     */
+    public RedirectView processWebResponsePayload(String webResponse) {
+        logger.info("Payment Callback Encrypted Web Response {} ", webResponse);
+        PaymentFinalResponse paymentFinalResponse = processInbCallBack(webResponse);
+        logger.info("Payment SBI Inb final response to transaction service paymentFinalResponse {} ", paymentFinalResponse);
+        TransactionDto transactionDto = transactionDao.getValidPaymentAckReq(paymentFinalResponse.getAtrn(), paymentFinalResponse.getTransactionStatus().toUpperCase().equalsIgnoreCase(PaymentConstants.FAILURE_CONST) ? PaymentConstants.FAILED : paymentFinalResponse.getTransactionStatus().toUpperCase());
+        RedirectView redirectView = new RedirectView();
+        redirectView.setUrl((paymentCallbackForwardService.getRedirectionUrl(transactionDto)).concat(PaymentConstants.MERCHANT_FINAL_RESPONSE).concat(Base64.getEncoder().encodeToString(paymentCallbackForwardService.processCallbackResponse(paymentFinalResponse,transactionDto,orderDao.getOrderDetails(transactionDto)).getBytes())));
+        return redirectView;
+    }
+
+    public PaymentFinalResponse processInbCallBack(String webResponse) {
+        logger.info("Payment Callback Encrypted Web Response for SBI INB {} ", webResponse);
+        // Decrypt Web response
+        String  decryptedWebResponse= Optional.ofNullable(inbEncryptionDecryptionUtil.decrypt(webResponse.replaceAll(PaymentConstants.NEW_LINE_REGEX, PaymentConstants.PATTERN_EMPTY).replace(PaymentConstants.PATTERN_SPACE,PaymentConstants.PATTERN_EMPTY))).filter(x->!x.isEmpty()).orElseThrow(()->new PaymentException(InbErrorConstants.WEB_RESPONSE_ERROR_CODE, InbErrorConstants.WEB_RESPONSE_ERROR_MESSAGE));
+        logger.info("Payment Callback Decrypted Web Response {} ", decryptedWebResponse);
+        // Check Request Parameters.
+        if (!paymentValidator.checkResponseParamData(decryptedWebResponse))
+            throw new PaymentException(InbErrorConstants.WEB_CHECKSUM_ERROR_CODE, InbErrorConstants.WEB_CHECKSUM_MISMATCH_ERROR_MESSAGE);
+        //Check Amount Validation.
+        getData(paymentUtil.getDecryptedData(decryptedWebResponse));
+        // Create web response DTO.
+        NbMapWebResponseDto nbMapWebResponseDto = Optional.ofNullable(new ObjectMapper().convertValue(paymentUtil.getDecryptedData(decryptedWebResponse), NbMapWebResponseDto.class)).orElseThrow(() ->new PaymentException(InbErrorConstants.WEB_CHECKSUM_ERROR_CODE, InbErrorConstants.WEB_CHECKSUM_MISMATCH_ERROR_MESSAGE));
+        logger.info("Payment Callback Decrypted Web Response nbMapWebResponseDto {} ", nbMapWebResponseDto);
+        // Save Web response in DB
+        paymentDao.saveResponseLog(decryptedWebResponse,nbMapWebResponseDto.getTxnrefNo(),nbMapWebResponseDto.getSbirefNo(),PaymentConstants.WEB_RESPONSE_TYPE,PaymentConstants.CREATED_BY);
+        // Check Web Checksum with created checksum.
+        String plainCheckSumStr = (decryptedWebResponse.lastIndexOf(PaymentConstants.PIPE) != -1 ) ?  decryptedWebResponse.substring(0,decryptedWebResponse.lastIndexOf(PaymentConstants.PIPE)) : decryptedWebResponse;
+        logger.info("Payment Callback Decrypted Web Response plain CheckSum String {} ", plainCheckSumStr);
+        logger.info("SBI INB Web Bank Created CheckSum String: {}, SBIePay Created Checksum string: {} ", nbMapWebResponseDto.getCheckSum(),inbEncryptionDecryptionUtil.getSHA2Checksum(plainCheckSumStr));
+        if (!paymentValidator.checkSum(nbMapWebResponseDto.getCheckSum() , (inbEncryptionDecryptionUtil.getSHA2Checksum(plainCheckSumStr)))){
+            statusUpdatePaymentDao.paymentFailureStatusUpdate(nbMapWebResponseDto.getTxnrefNo(), nbMapWebResponseDto.getSbirefNo(), nbMapWebResponseDto.getStatus(), PaymentConstants.SBI_NET_BANKING);
+            throw new PaymentException(InbErrorConstants.WEB_CHECKSUM_ERROR_CODE, InbErrorConstants.WEB_CHECKSUM_MISMATCH_ERROR_MESSAGE);
+        }
+
+        // Validated PaymentResponse for INB
+        NbMapWebResponseDto callBackResponse=getCallBackResponse(nbMapWebResponseDto);
+        paymentInbValidator.validateNBCallBack(callBackResponse);
+        // atrn txn status is BOOKED and payment status is PAYMENT_INITIATION_START / amount Validation
+        TransactionDto transactionDto = transactionDao.getValidPaymentAckReq(nbMapWebResponseDto.getTxnrefNo(), PaymentStatus.BOOKED.toString(),PaymentConstants.NB_CONST);
+        paymentValidator.validateDebitAmount(nbMapWebResponseDto.getAmount());
+        // Validation for Bank Ref Number.
+        if (!paymentValidator.ValidateWebResponseBankReferenceNumber(nbMapWebResponseDto.getSbirefNo())) {
+            statusUpdatePaymentDao.paymentFailureStatusUpdate(nbMapWebResponseDto.getTxnrefNo(),nbMapWebResponseDto.getSbirefNo(), InbErrorConstants.BANK_REF_NO_ERROR_MESSAGE,PaymentConstants.SBI_NET_BANKING);
+            throw new PaymentException(InbErrorConstants.BANK_REF_NO_ERROR_CODE, InbErrorConstants.BANK_REF_NO_ERROR_MESSAGE);
+        }
+        switch (nbMapWebResponseDto.getStatus()) {
+            case PaymentConstants.SUCCESS_CONST, PaymentConstants.PENDING_CONST -> {
+                String dvRequestString = nbPaymentDao.processInbDoubleVerRequest(nbMapWebResponseDto);
+                logger.info("Payment Callback Plan DV Request for SBIINB {} " + dvRequestString);
+
+                String inbDvResponse = paymentWebClientService.processingDoubleVerRequest(dvRequestString,transactionDto.getGatewayIssueMECode());
+                logger.info("Payment Callback Plan DV Response for SBIINB {} " + inbDvResponse);
+
+                NbMapWebResponseDto nbMapDVResponseDto = new ObjectMapper().convertValue(paymentUtil.getDecryptedData(inbDvResponse.trim()), NbMapWebResponseDto.class);
+                logger.info("Payment Callback nbMapDVResponseDto for SBIINB {} " + nbMapDVResponseDto);
+
+                nbMapWebResponseDto = nbPaymentDao.processNbDoubleVerRequest(nbMapWebResponseDto,nbMapDVResponseDto,inbDvResponse);
+                logger.info("Payment Callback nbMapWebResponseDto for SBIINB {} ",nbMapWebResponseDto);
+            }
+            default -> {
+                statusUpdatePaymentDao.paymentFailureStatusUpdate(nbMapWebResponseDto.getTxnrefNo(), nbMapWebResponseDto.getSbirefNo(), nbMapWebResponseDto.getStatus_desc(), PaymentConstants.SBI_NET_BANKING);
+                logger.info("default Payment Callback nbMapWebResponseDto for SBIINB {} ",getRedirectObject(nbMapWebResponseDto));
+                return getRedirectObject(nbMapWebResponseDto);
+            }
+        }
+        //Redirecting to Browser.
+        return getRedirectObject(nbMapWebResponseDto);
+    }
+
+    /**
+     * @return: PaymentFinalResponse
+     * @methodName: getRedirectObject
+     * @@Method-Description: Process setting response data
+     * @param: TransactionDto,Status
+     * @Exception: or @Error :Exception
+     */
+    public PaymentFinalResponse getRedirectObject(NbMapWebResponseDto nbMapWebResponseDto) {
+        TransactionDto transactionDto = transactionDao.getTransactionDetails(nbMapWebResponseDto.getTxnrefNo());
+        Order order = orderDao.getOrderDetails(transactionDto);
+        FinalResponseStatus finalResponseStatus=getStatus(transactionDto,order,nbMapWebResponseDto.getStatus() == null ? PaymentConstants.EMPTY : nbMapWebResponseDto.getStatus(),nbMapWebResponseDto.getStatus_desc() == null ? PaymentConstants.EMPTY : nbMapWebResponseDto.getStatus_desc());
+
+        return PaymentFinalResponse.builder()
+                .mId(transactionDto.getMerchantId() == null ? PaymentConstants.EMPTY : transactionDto.getMerchantId())
+                .merchantOrderNumber(transactionDto.getOrderRefNumber()  == null ? PaymentConstants.EMPTY : transactionDto.getOrderRefNumber())
+                .sbiOrderId(transactionDto.getSbiOrderRefNumber() == null ? PaymentConstants.EMPTY : transactionDto.getSbiOrderRefNumber())
+                .orderAmount(String.valueOf(transactionDto.getOrderAmount()== null ? PaymentConstants.EMPTY : String.valueOf(transactionDto.getOrderAmount())))
+                .totalAmount(String.valueOf(transactionDto.getDebitAmt()) == null ? PaymentConstants.EMPTY : String.valueOf(transactionDto.getDebitAmt()))
+                .atrn(transactionDto.getAtrnNum() == null ? PaymentConstants.EMPTY : transactionDto.getAtrnNum())
+                .transactionStatus(finalResponseStatus.getStatus())
+                .reason(finalResponseStatus.getResponseReason())
+                .CIN(transactionDto.getCin() == null ? PaymentConstants.EMPTY : transactionDto.getCin())
+                .otherDetails(order.getOtherDetails() == null ? PaymentConstants.EMPTY : order.getOtherDetails())
+                .bankName(transactionDto.getChannelBank() == null ? PaymentConstants.EMPTY : transactionDto.getChannelBank())
+                .bankTxnNumber(transactionDto.getBankReferenceNumber() == null ? PaymentConstants.EMPTY : transactionDto.getBankReferenceNumber())
+                .bankCode(transactionDto.getPayMode() == null ? PaymentConstants.EMPTY : transactionDto.getPayMode())
+                .customerId(order.getCustomerId() == null ? PaymentConstants.EMPTY : order.getCustomerId())
+                .orderRetryCount(String.valueOf(order.getOrderRetryCount()) == null ? PaymentConstants.EMPTY : String.valueOf(order.getOrderRetryCount()))
+                .build();
+    }
+    /**
+     * @return: FinalResponseStatus
+     * @methodName: getStatus
+     * @@Method-Description: Process setting response status
+     * @param: transactionDto,order,channelStatus,failureReason
+     * @Exception: or @Error :Exception
+     */
+    public FinalResponseStatus getStatus(TransactionDto transactionDto, Order order, String channelStatus, String failureReason){
+        if(!transactionDto.getOrderAmount().equals(order.getOrderAmount())){
+            return FinalResponseStatus.builder().status(PaymentConstants.FAILED).responseReason(PaymentConstants.FAILED_FOR_AMOUNT_NOT_MATCHED).build();
+        }else{
+            return FinalResponseStatus.builder().status(channelStatus).responseReason(failureReason.replaceAll(PaymentConstants.SPECIAL_CHAR_REGEX,PaymentConstants.EMPTY)).build();
+        }
+    }
+
+    public PaymentInitiationRequest getInitiationRequest(PaymentRequest paymentRequest){
+        return PaymentInitiationRequest.builder()
+                .atrn(paymentRequest.getAtrn())
+                .paymode(PaymentConstants.NB_CONST)
+                .build();
+    }
+
+    public NbMapWebResponseDto getCallBackResponse(NbMapWebResponseDto nbMapWebResponseDto) {
+        return NbMapWebResponseDto.builder()
+                .sbirefNo(nbMapWebResponseDto.getSbirefNo())
+                .amount(nbMapWebResponseDto.getAmount())
+                .txnrefNo(nbMapWebResponseDto.getTxnrefNo())
+                .status(nbMapWebResponseDto.getStatus())
+                .status_desc(nbMapWebResponseDto.getStatus_desc())
+                .checkSum(nbMapWebResponseDto.getCheckSum())
+                .build();
+    }
+
+    public void getData(Map<String, String> map) {
+        paymentInbValidator.validateNBAmountCallBack(map.get(PaymentConstants.AMOUNT),PaymentConstants.AMOUNT);
+        paymentInbValidator.validateNBRequiredCallBack(map.get(PaymentConstants.AMOUNT),PaymentConstants.AMOUNT);
+        paymentInbValidator.validateNBRequiredCallBack(map.get(PaymentConstants.TXN_REF_NO),PaymentConstants.TXN_REF_NO);
+        paymentInbValidator.validateNBRequiredCallBack(map.get(PaymentConstants.STATUS),PaymentConstants.STATUS);
+        paymentInbValidator.validateNBRequiredCallBack(map.get(PaymentConstants.STATUS_DESC),PaymentConstants.STATUS_DESC);
+    }
+}
+
+============================================================
+PaymentUtil.java
+============================================================
+package com.epay.payment.util;
+
+import com.epay.payment.config.InbConfigDeatils;
+import com.epay.payment.config.WalletConfig;
+import com.epay.payment.config.WhitespaceDeserializer;
+import com.epay.payment.dto.NeftRtgsDealerValidationDto;
+import com.epay.payment.exceptions.PaymentException;
+import com.epay.payment.externalservice.PaymentWebClientService;
+import com.epay.payment.validator.PaymentValidator;
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonParseException;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonMappingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException;
+import com.fasterxml.jackson.databind.module.SimpleModule;
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import lombok.RequiredArgsConstructor;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.stereotype.Component;
+
+import java.lang.reflect.Field;
+import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.text.DecimalFormat;
+import java.text.MessageFormat;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
+import java.time.format.DateTimeParseException;
+import java.time.format.ResolverStyle;
+import java.util.*;
+import java.security.SecureRandom;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
+
+
+@Component
+@RequiredArgsConstructor
+public class PaymentUtil {
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+    private  final InbEncryptionDecryptionUtil inbEncryptionDecryptionUtil;
+    private final InbConfigDeatils inbConfigDeatils;
+    private final PaymentWebClientService paymentWebClientService;
+    private final PaymentValidator paymentValidator;
+    private final MobikwikWalletEncryptionDecryptionUtil walletEncryptionDecryptionUtil;
+    private final WalletConfig walletConfig;
+    private static final AtomicLong COUNTER = new AtomicLong(0);
+    private static final ObjectMapper objectMapper = new ObjectMapper(new JsonFactory().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)).enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES).registerModule(new SimpleModule().addDeserializer(String.class, new WhitespaceDeserializer()));
+
+
+    /**
+     * @return: key, value
+     * @methodName: Web and DV Decrypted Data set in map.
+     * @@Method-Description: Process DecryptedData and set in map.
+     * @param: getDecryptedData
+     * @Exception: or @Error :Exception
+     */
+    public Map<String,String> getDecryptedData(String decResponse) {
+        return Optional.of(Arrays.stream(decResponse.split(PaymentConstants.INB_PIPE_CONST))
+                        .map(kv -> kv.split(PaymentConstants.PATTERN_EQUAL_TO_CONST))
+                        .filter(kvArray -> kvArray.length == 2)
+                        .collect(Collectors.toMap(kv -> kv[0], kv ->StringUtils.isBlank(kv[1])?PaymentConstants.NA:kv[1])))
+                .orElseThrow(() ->new PaymentException(InbErrorConstants.WEB_CHECKSUM_ERROR_CODE, InbErrorConstants.WEB_CHECKSUM_MISMATCH_ERROR_MESSAGE));
+    }
+
+    /**
+     * @return: webRequestData and Checksum
+     * @methodName: Create Web Request for SBI Bank.
+     * @@Method-Description: Process Create Web Request and checksum.
+     * @param: createEncrptedWebReq
+     * @Exception: or @Error :Exception
+     */
+    public String createWebRequest(String atrn, BigDecimal amountFromDB) {
+        logger.info("Payment Initiation amountFromDB {} for SBI INB : ", amountFromDB);
+
+        StringBuilder webReqData = new StringBuilder();
+
+        logger.info("Payment Initiation amt {} for SBI INB : ", amountFromDB.toString().replaceAll(PaymentConstants.COMMA_CONST,PaymentConstants.EMPTY));
+        webReqData.append(MessageFormat.format(PaymentConstants.SBIINB_WEB_REQUEST,atrn,amountFromDB.toString().replaceAll(PaymentConstants.COMMA_CONST,PaymentConstants.EMPTY), inbConfigDeatils.getCancelUrl(), inbConfigDeatils.getSbiRedirectUrl()));
+        logger.info("Payment Initiation using builder webReqData {} for SBI INB : ", webReqData);
+
+        String checkSum = inbEncryptionDecryptionUtil.getSHA2Checksum(webReqData.toString());
+        logger.info("Payment Initiation Web Request {} ,and checkSum{} , and ATRN {} for SBI INB : ", webReqData,checkSum,atrn);
+        return   Optional.of(webReqData.toString()
+                        .concat(PaymentConstants.SBIINB_CHECKSUM)
+                        .concat(checkSum)).filter(x->!x.isEmpty())
+                .orElseThrow(() ->new PaymentException(InbErrorConstants.ENCRYPTION_ERROR_CODE, InbErrorConstants.ENCRYPTION_ERROR_MESSAGE));
+    }
+    /**
+     * Parse exception error message.
+     * @param cause JsonProcessingException
+     * @return error message
+     */
+    public static String getParsingError(Throwable cause) {
+        if (cause instanceof UnrecognizedPropertyException unrecognizedPropertyException) {
+            return PaymentConstants.UNRECOGNIZED_FIELD + unrecognizedPropertyException.getPropertyName();
+        } else if (cause instanceof JsonParseException jsonParseException && StringUtils.startsWithIgnoreCase(jsonParseException.getMessage(),PaymentConstants.DUPLICATE_FIELD)) {
+            return jsonParseException.getMessage().substring(0, jsonParseException.getMessage().indexOf(PaymentConstants.NEWLINE_REGEX)).replaceAll(PaymentConstants.SINGLE_QUOTE,PaymentConstants.PATTERN_EMPTY);
+        } else if (cause instanceof JsonMappingException jsonMappingException) {
+            Optional<String> fieldName = jsonMappingException.getPath().stream().map(JsonMappingException.Reference::getFieldName).reduce((first, second) -> second);
+            if (fieldName.isPresent()) {
+                return PaymentConstants.INVALID_INPUT_FIELD + fieldName.get();
+            }
+        }
+        return PaymentConstants.INVALID_INPUT;
+    }
+
+    public static  String generatePspRefNo() {
+        String timestamp = String.valueOf(Instant.now().toEpochMilli());
+        StringBuilder randomDigits = new StringBuilder();
+        for (int i = 0; i < 6; i++) {
+            randomDigits.append(new SecureRandom().nextInt(10));
+        }
+        long counter = COUNTER.incrementAndGet() % 10000; // Limit to 4 digits
+        String counterStr = String.format("%04d", counter);
+        // Combine: timestamp (13-14 digits) + counter (4 digits) + random (fill to 18 digits)
+        String numericPart = (timestamp + counterStr + randomDigits).substring(0, 18);
+        // Prefix with "UP"
+        return "UP" + numericPart;
+    }
+
+    /**
+     * Converts an object to its JSON representation as a string.
+     * Utilizes Jackson's ObjectMapper to serialize the provided object to a JSON string.
+     * If an error occurs during serialization, it logs the error and throws a custom exception.
+     *
+     * @param t The object to be converted to JSON.
+     * @param <T> The type of the object to be converted.
+     * @return The JSON string representation of the object.
+     * @throws PaymentException If the object fails to be converted to JSON.
+     */
+    public static <T> String toJson(T t) {
+        try {
+            return objectMapper.writeValueAsString(t);
+        } catch (JsonProcessingException e) {
+            throw new PaymentException(ErrorConstants.INVALID_ERROR_CODE, "Failed to convert JSON string.");
+        }
+    }
+
+
+    /**
+     * @return: webRequestData and Checksum
+     * @methodName: Create Web Request for Wallet_mobikwik.
+     * @@Method-Description: Process Create Web Request and checksum.
+     * @param: createEncrptedWebReq
+     * @Exception: or @Error :Exception
+     */
+    public String createMobikwikWebRequest(String atrn, BigDecimal amountFromDB) {
+        String finalWebReqData = Arrays.stream(MessageFormat.format(PaymentConstants.MOBIKWIK_URL_VALUE_REQUEST_CHECKSUM ,amountFromDB,atrn,walletConfig.getWallettosbiRedirectUrl(),walletConfig.getMid())
+                .split("\\|")).map(String :: trim).map(s -> "'"+s +"'").collect(Collectors.joining());
+        logger.info("Payment Initiation using builder webReqData {} for Wallet MobikWik : ", finalWebReqData);
+        String createCheckSum= MobikwikWalletEncryptionDecryptionUtil.getSHA256CheckSumValue(finalWebReqData, walletConfig.getSecretKey());
+        logger.info("Payment Initiation using builder webReqData: {} createCheckSum: {} atrn: {} for Wallet MobikWik : ", finalWebReqData,createCheckSum,atrn);
+        return  Optional.of((MessageFormat.format(PaymentConstants.MOBIKWIK_URL_VALUE_REQUEST, amountFromDB.toString(), atrn, walletConfig.getMid(), walletConfig.getMerchantname().trim(), walletConfig.getRedirectDVUrl(), createCheckSum)))
+                .filter(x->!x.isEmpty())
+                .orElseThrow(() ->new PaymentException(WalletErrorConstant.ENCRYPTION_ERROR_CODE, WalletErrorConstant.ENCRYPTION_ERROR_MESSAGE_WALLET));
+    }
+
+    /**
+     * @return: String
+     * @methodName: formatedAmount.
+     * @@Method-Description: convert amount to decimal formate for web response checksum .
+     * @param: amount
+     * @Exception: or @Error :
+     */
+    public String formatedAmount( BigDecimal amount){
+        BigDecimal convertedAmount = amount.setScale(2, BigDecimal.ROUND_UP);
+        DecimalFormat df = new DecimalFormat("0.00");
+        return df.format(convertedAmount);
+    }
+
+    /**
+     * @return: key, value
+     * @methodName: Web and DV Decrypted Data set in map.
+     * @@Method-Description: Process DecryptedData and set in map.
+     * @param: getDecryptedData
+     * @Exception: or @Error :Exception
+     */
+    public Map<String,String> getWalletDecryptedData(String decResponse) {
+        return Optional.of(Arrays.stream(decResponse.split(PaymentConstants.WALLET_RES_CONST))
+                        .map(kv -> kv.split(PaymentConstants.PATTERN_EQUAL_TO_CONST))
+                        .filter(kvArray -> kvArray.length == 2)
+                        .collect(Collectors.toMap(kv -> kv[0], kv ->StringUtils.isBlank(kv[1])?PaymentConstants.NA:kv[1])))
+                .orElseThrow(() ->new PaymentException(WalletErrorConstant.WEB_RESPONSE_ERROR_CODE, WalletErrorConstant.WEB_RESPONSE_ERROR_MESSAGE));
+    }
+
+    public static String validateNeftRtgsInputDate( String neftRtgsInputDate){
+        DateTimeFormatter dateTime = new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern(PaymentConstants.NEFT_RTGS_INPUT_DATE_FORMAT_PATTERN).toFormatter(Locale.ENGLISH);
+        try{
+            LocalDate.parse(neftRtgsInputDate, dateTime);
+            return "OK";
+        }catch (DateTimeParseException e){
+            return "FALSE";
+        }
+    }
+
+    public static List<String> getNullFields(NeftRtgsDealerValidationDto neftRtgsDealerValidationDto) {
+        Class<?> clazz = neftRtgsDealerValidationDto.getClass();
+
+        return Arrays.stream(neftRtgsDealerValidationDto.getClass().getDeclaredFields())
+                .peek(field -> field.setAccessible(true)) // Allows access to private fields
+                .filter(field -> {
+                    try {
+                        Object value = field.get(neftRtgsDealerValidationDto);
+                        if(value == null){
+                            return true;
+                        }
+                        if(value instanceof String str){
+                            return str.isBlank() || str.trim().equalsIgnoreCase("null");
+                        }
+                        return false;
+                        //return field.get(neftRtgsDealerValidationDto) == null || (field.get(neftRtgsDealerValidationDto) instanceof String s && s.isBlank()); // Check if the field value is null
+                    } catch (IllegalAccessException e) {
+                        // Handle potential access exceptions
+                        throw new RuntimeException("Error accessing field: " + field.getName(), e);
+                    }
+                })
+                .map(Field::getName) // Map to the field name
+                .collect(Collectors.toList()); // Collect the names into a list
+    }
+
+    public static List<String> getLeadingTrailingSpaces(NeftRtgsDealerValidationDto neftRtgsDealerValidationDto) {
+        Class<?> clazz = neftRtgsDealerValidationDto.getClass();
+
+        return Arrays.stream(clazz.getDeclaredFields())
+                .peek(field -> field.setAccessible(true)) // Allows access to private fields
+                .filter(field -> {
+                    try {
+                        return field.get(neftRtgsDealerValidationDto) != null && (field.get(neftRtgsDealerValidationDto) instanceof String s && !s.equals(s.trim())); // Check if the field value is null
+                    } catch (IllegalAccessException e) {
+                        // Handle potential access exceptions
+                        throw new RuntimeException("Error accessing field: " + field.getName(), e);
+                    }
+                })
+                .map(Field::getName) // Map to the field name
+                .collect(Collectors.toList()); // Collect the names into a list
+    }
+
+    public Map<String,String> getCSCWalletDecryptedData(String decResponse) {
+        return Optional.of(Arrays.stream(decResponse.split(PaymentConstants.INB_PIPE_CONST))
+                        .map(kv -> kv.split(PaymentConstants.PATTERN_EQUAL_TO_CONST))
+                        .filter(kvArray -> kvArray.length == 2)
+                        .collect(Collectors.toMap(kv -> kv[0], kv ->StringUtils.isBlank(kv[1])?PaymentConstants.NA:kv[1])))
+                .orElseThrow(() ->new PaymentException(InbErrorConstants.WEB_CHECKSUM_ERROR_CODE, InbErrorConstants.WEB_CHECKSUM_MISMATCH_ERROR_MESSAGE));
+    }
+
+}
+
+============================================================
+TransactionDao.java
+============================================================
+package com.epay.payment.dao;
+
+import com.epay.payment.dto.TransactionDto;
+import com.epay.payment.entity.MerchantOrderPayments;
+import com.epay.payment.exceptions.PaymentException;
+import com.epay.payment.mapper.TransactionMapper;
+import com.epay.payment.repository.TransactionRepository;
+import com.epay.payment.util.CashChallanErrorConstants;
+import com.epay.payment.util.ErrorConstants;
+import com.epay.payment.util.NeftChallanErrorConstants;
+import com.epay.payment.util.PaymentConstants;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+
+import java.text.MessageFormat;
+import java.util.List;
+
+/**
+ * Class Name: TransactionDao
+ * *
+ * Description:
+ * *
+ * Author: VCE2645(Siddhesh Nikam)
+ * Copyright (c) 2024 [State Bank of India]
+ * ALl rights reserved
+ * *
+ * Version: 1.0
+ */
+@Component
+@RequiredArgsConstructor
+public class TransactionDao {
+
+    private final TransactionRepository transactionRepository;
+    private final TransactionMapper transactionMapper;
+
+    public TransactionDto getValidPaymentAckReq(String atrn, String paymentStatus) {
+        MerchantOrderPayments merchantOrderPayments = transactionRepository.findByAtrnNumAndTransactionStatus(atrn, paymentStatus)
+                .orElseThrow(() -> new PaymentException(ErrorConstants.INVALID_ERROR_CODE, MessageFormat
+                        .format(ErrorConstants.INVALID_ERROR_MESSAGE, PaymentConstants.atrn, PaymentConstants.ATRN_NOT_FOUND)));
+        return transactionMapper.mapToTransactionDto(merchantOrderPayments);
+    }
+
+    public TransactionDto getValidPaymentAckReq(String atrn, String paymentStatus, String payMode) {
+        MerchantOrderPayments merchantOrderPayments = transactionRepository.findByAtrnNumAndTransactionStatusAndPayMode(atrn, paymentStatus, payMode)
+                .orElseThrow(() -> new PaymentException(ErrorConstants.INVALID_ERROR_CODE, MessageFormat
+                        .format(ErrorConstants.INVALID_ERROR_MESSAGE, PaymentConstants.atrn, PaymentConstants.ATRN_NOT_FOUND)));
+        return transactionMapper.mapToTransactionDto(merchantOrderPayments);
+    }
+
+
+    public TransactionDto getValidPaymodePaymentAckReq(String atrn, String payMode) {
+        MerchantOrderPayments merchantOrderPayments = transactionRepository.findByAtrnNumAndPayMode(atrn, payMode)
+                .orElseThrow(() -> new PaymentException(ErrorConstants.INVALID_ERROR_CODE, MessageFormat
+                        .format(ErrorConstants.INVALID_ERROR_MESSAGE, PaymentConstants.atrn, PaymentConstants.ATRN_NOT_FOUND)));
+        return transactionMapper.mapToTransactionDto(merchantOrderPayments);
+    }
+
+    public TransactionDto getUpiPricing(String atrn, String payProc) {
+        MerchantOrderPayments merchantOrderPayments = transactionRepository.findByAtrnNumAndPayMode(atrn, payProc)
+                .orElseThrow(() -> new PaymentException(ErrorConstants.INVALID_ERROR_CODE, MessageFormat
+                        .format(ErrorConstants.INVALID_ERROR_MESSAGE, PaymentConstants.atrn, PaymentConstants.ATRN_NOT_FOUND)));
+        return transactionMapper.mapToTransactionDto(merchantOrderPayments);
+    }
+
+
+
+    public TransactionDto getTransactionDetails(String atrn) {
+        MerchantOrderPayments byAtrn = transactionRepository.findByAtrnNum(atrn);
+        return transactionMapper.mapToTransactionDto(byAtrn);
+    }
+
+    public List<TransactionDto> getBookingMerchantOrderPayments() {
+        return transactionMapper.mapMerchantOrderPaymentEntity(transactionRepository.findBookingMerchantOrderPayments());
+    }
+
+    public TransactionDto getValidPaymentAckCashReq(String atrn, String paymentStatus, String payMode) {
+        MerchantOrderPayments merchantOrderPayments = transactionRepository.findByAtrnNumAndTransactionStatusAndPayMode(atrn, paymentStatus, payMode)
+                .orElseThrow(() -> new PaymentException(CashChallanErrorConstants.INVALID_ERROR_CODE, MessageFormat
+                        .format(ErrorConstants.INVALID_ERROR_MESSAGE, PaymentConstants.CHALLAN_NUMBER, PaymentConstants.CHALLAN_NUMBER_NOT_FOUND)));
+        return transactionMapper.mapToTransactionDto(merchantOrderPayments);
+    }
+
+    public TransactionDto getValidPaymentAckNeftRtgsReq(String atrn, String paymentStatus, String payMode) {
+        MerchantOrderPayments merchantOrderPayments = transactionRepository.findByAtrnNumAndTransactionStatusAndPayMode(atrn, paymentStatus, payMode)
+                .orElseThrow(() -> new PaymentException(NeftChallanErrorConstants.INVALID_ERROR_CODE, MessageFormat
+                        .format(ErrorConstants.INVALID_ERROR_MESSAGE, PaymentConstants.CHALLAN_NUMBER, PaymentConstants.CHALLAN_NUMBER_NOT_FOUND)));
+        return transactionMapper.mapToTransactionDto(merchantOrderPayments);
+    }
+}
+============================================================
+PaymentDao.java
+============================================================
+package com.epay.payment.dao;
+
+import com.epay.payment.config.InbConfigDeatils;
+import com.epay.payment.dto.*;
+import com.epay.payment.entity.*;
+import com.epay.payment.mapper.TransactionMapper;
+import com.epay.payment.model.response.PayPalCreateOrderResponse;
+import com.epay.payment.repository.*;
+import com.epay.payment.util.PaymentConstants;
+import com.epay.payment.util.enums.OrderStatus;
+import com.epay.payment.util.enums.PaymentStatus;
+import com.epay.payment.util.enums.TransactionStatus;
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import jakarta.transaction.Transactional;
+import lombok.RequiredArgsConstructor;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.stereotype.Component;
+
+import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.util.Date;
+import java.util.Map;
+import java.util.function.Predicate;
+
+/**
+ * Class Name: PaymentDAO
+ * *
+ * Description:
+ * *
+ * Author: VCE2645(Siddhesh Nikam)
+ * Copyright (c) 2024 [State Bank of India]
+ * ALl rights reserved
+ * *
+ * Version: 1.0
+ */
+@Component
+@RequiredArgsConstructor
+public class PaymentDao {
+    private final PaymentRepository paymentRepository;
+    private final PaymentOrderSummeryRepository paymentOrderSummeryRepository;
+    private final TransactionDao transactionDao;
+    private final TransactionMapper transactionMapper;
+    private final TransactionRepository transactionRepository;
+    private final OrderDao orderDao;
+    private final OrderRepository orderRepository;
+    private final TokenRepository tokenRepository;
+    private final InbConfigDeatils inbConfigDeatils;
+    private final AdminDao adminDao;
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+
+    public void saveRequestLog(String paymentApiRequest, String atrn,String requestType,String createdBy) {
+        PaymentLog webRequest = PaymentLog.builder()
+                .atrnNum(atrn)
+                .requestType(requestType)
+                .log(paymentApiRequest.getBytes())
+                .createdBy(createdBy)
+                .createdDate(new Timestamp(System.currentTimeMillis()).getTime())
+                .build();
+        paymentRepository.save(webRequest);
+    }
+
+    public void saveResponseLog(String paymentApiResponse, String atrn, String sbiRefNo, String requestType,String createdBy) {
+        PaymentLog webResponse = PaymentLog.builder()
+                .atrnNum(atrn)
+                .sbiOrderRefNumber(sbiRefNo)
+                .requestType(requestType)
+                .log(paymentApiResponse.getBytes())
+                .createdBy(createdBy)
+                .createdDate((new Timestamp(System.currentTimeMillis()).getTime()))
+                .build();
+        paymentRepository.save(webResponse);
+    }
+
+    public void updateSuccessTransactionStatusGen(String paymentStatus, String transactionRefNo, String sbiRefNo, String updatedBy, Long updatedDate) {
+        TransactionDto transactionDto = transactionDao.getValidPaymentAckReq(transactionRefNo, PaymentStatus.BOOKED.toString());
+        transactionDto.setTransactionStatus(TransactionStatus.valueOf(paymentStatus));
+        transactionDto.setPaymentStatus(PaymentStatus.valueOf(paymentStatus));
+        switch (transactionDto.getPayMode()){
+            case PaymentConstants.NB_CONST -> {
+                if (transactionDto.getGtwMapId().equalsIgnoreCase(inbConfigDeatils.getGtwMapId()))
+                    transactionDto.setBankReferenceNumber(sbiRefNo);
+                else
+                    transactionDto.setBankReferenceNumber(transactionRefNo);
+            }
+            default -> transactionDto.setBankReferenceNumber(sbiRefNo);
+        }
+        transactionDto.setUpdatedBy(updatedBy);
+        transactionDto.setUpdatedDate(updatedDate);
+        transactionDto.setPaymentSuccessDate(new Date());
+        MerchantOrderPayments merchantOrderPayments = transactionMapper.transactionDtoToEntity(transactionDto);
+        MerchantOrderPayments merchantOrderPaymentsData = transactionRepository.save(merchantOrderPayments);
+        logger.debug("After payments success update transactionData {}", merchantOrderPaymentsData);
+    }
+    @Transactional
+    public void updateFailPendingTransactionStatusGen(String transactionStatus, String paymentStatus, String sbiRefNo, String FailureReason, String transactionRefNo, String updatedBy, Long updatedDate) {
+
+        TransactionDto transactionDto = transactionDao.getValidPaymentAckReq(transactionRefNo, PaymentStatus.BOOKED.toString());
+        transactionDto.setTransactionStatus(TransactionStatus.valueOf(transactionStatus));
+        transactionDto.setPaymentStatus(PaymentStatus.valueOf(paymentStatus));
+        transactionDto.setFailReason(FailureReason);
+//        transactionDto.setSbiOrderRefNumber(sbiRefNo); // UAT (for INB)
+        transactionDto.setBankReferenceNumber(sbiRefNo); // Prod (for INB)
+        transactionDto.setUpdatedBy(updatedBy);
+        transactionDto.setUpdatedDate(updatedDate);
+
+        logger.info("transactionDto for payments failed update. {}", transactionDto);
+        MerchantOrderPayments merchantOrderPayments = transactionMapper.transactionDtoToEntity(transactionDto);
+        MerchantOrderPayments merchantOrderPaymentsData = transactionRepository.save(merchantOrderPayments);
+        logger.info("After payments failed update transactionData. {}", merchantOrderPaymentsData);
+        retryUpdateOrderStatusFailed(transactionDto);
+    }
+
+    public void updateUpiFailPendingTransactionStatusGen(String transactionStatus, String paymentStatus,UpiMapDbResponseDto upiMapDbResponseDto , String updatedBy, Long updatedDate) {
+
+        TransactionDto transactionDto = transactionDao.getValidPaymentAckReq(upiMapDbResponseDto.getTxnrefNo(), PaymentStatus.BOOKED.toString());
+        transactionDto.setTransactionStatus(TransactionStatus.valueOf(transactionStatus));
+        transactionDto.setPaymentStatus(PaymentStatus.valueOf(paymentStatus));
+        transactionDto.setFailReason(upiMapDbResponseDto.getStatus_desc());
+        transactionDto.setBankReferenceNumber(upiMapDbResponseDto.getSbirefNo());
+        transactionDto.setPayProcId(upiMapDbResponseDto.getPayProc());
+        transactionDto.setGtwMapId(upiMapDbResponseDto.getGtwMapId());
+        transactionDto.setBankReferenceNumber(upiMapDbResponseDto.getSbirefNo());
+        transactionDto.setUpdatedBy(updatedBy);
+        transactionDto.setUpdatedDate(updatedDate);
+
+        logger.info("transactionDto for payments success update {}", transactionDto);
+        MerchantOrderPayments merchantOrderPayments = transactionMapper.transactionDtoToEntity(transactionDto);
+        MerchantOrderPayments merchantOrderPaymentsData = transactionRepository.save(merchantOrderPayments);
+        retryUpdateOrderStatusFailed(transactionDto);
+        logger.info("After payments success update transactionData {}", merchantOrderPaymentsData);
+    }
+
+
+    public void retryUpdateOrderStatusFailed(TransactionDto transactionDto) {
+        logger.info("transactionDto for payments failed update. getSbiOrderRefNumber. {}, getOrderRefNumber. {}", transactionDto.getSbiOrderRefNumber(), transactionDto.getOrderRefNumber());
+        Order order = orderDao.getOrderDetails(transactionDto);
+        logger.info(" order..... {}",order);
+        if (order.getOrderRetryCount() <= 0 && OrderStatus.ATTEMPTED.equals(order.getStatus())) {
+            order.setStatus(OrderStatus.FAILED);
+            order.setUpdatedBy(transactionDto.getUpdatedBy());
+            order.setUpdatedDate(transactionDto.getUpdatedDate());
+            orderRepository.save(order);
+        }
+    }
+
+    /**
+     * Method name : getHvalBySbiRefenceNumber
+     * Description : Fetch AES key from database
+     *
+     * @param sbiOrderRefNumber String
+     * @return a String of AESKey
+     */
+    public String findAesKeyBySbiOrderRefNumber(String sbiOrderRefNumber, String mId, String mek) {
+        if(isMerchantHostedEnabled(mId)){
+            return mek;
+        }
+        return tokenRepository.findAesKeyBySbiOrderRefNumber(sbiOrderRefNumber).get().getAesKey();
+    }
+
+    /**
+     * Method name : getHvalBySbiRefenceNumber
+     * Description : Fetch AES key from database
+     *
+     * @param sbiOrderRefNumber String
+     * @return a String of AESKey
+     */
+    public String findAesKeyBySbiOrderRefNumber(String sbiOrderRefNumber) {
+        return tokenRepository.findAesKeyBySbiOrderRefNumber(sbiOrderRefNumber).get().getAesKey();
+    }
+
+    public boolean isMerchantHostedEnabled(String mId) {
+        logger.info("Checking if merchant exists for mId: {}", mId);
+        return Boolean.TRUE.equals(adminDao.isMerchantHostedEnabled(mId));
+    }
+
+    public void saveOtherInbAtrnDetails(OtherInbMapResponseDto otherInbMapResponseDto) {
+        TransactionDto transactionDto = transactionDao.getValidPaymentAckReq(otherInbMapResponseDto.getOtherInbAtrn(), otherInbMapResponseDto.getStatus().equalsIgnoreCase(PaymentConstants.FAIL_CONST) ? PaymentConstants.FAILED : otherInbMapResponseDto.getStatus().toUpperCase(), PaymentConstants.NB_CONST);
+        logger.debug("transactionDto for other INB update bank_ref_no as ATRN {}", otherInbMapResponseDto.getAtrn());
+        transactionDto.setBankReferenceNumber(otherInbMapResponseDto.getAtrn());
+        MerchantOrderPayments merchantOrderPayments = transactionMapper.transactionDtoToEntity(transactionDto);
+        transactionRepository.save(merchantOrderPayments);
+    }
+
+    public void saveBankRefNumber(String txnRefNo, String refNumber, String updatedBy) {
+        TransactionDto transactionDto = transactionDao.getTransactionDetails(txnRefNo);
+        transactionDto.setBankReferenceNumber(refNumber);
+        transactionDto.setPaymentStatus(PaymentStatus.BOOKED);
+        transactionDto.setUpdatedBy(updatedBy);
+        MerchantOrderPayments merchantOrderPayments = transactionMapper.transactionDtoToEntity(transactionDto);
+        logger.debug("transactionDto for other NEFT/RTGS update bank_ref_no as ATRN {}", transactionDto);
+        transactionRepository.save(merchantOrderPayments);
+    }
+
+    public void updateTransactionStatus(TransactionDto transactionDto,String transactionStatus, String paymentStatus, String FailureReason,  String updatedBy) {
+        transactionDto.setTransactionStatus(TransactionStatus.valueOf(transactionStatus));
+        transactionDto.setPaymentStatus(PaymentStatus.valueOf(paymentStatus));
+        transactionDto.setFailReason(FailureReason);
+        transactionDto.setBankReferenceNumber(transactionDto.getBankReferenceNumber());
+        transactionDto.setUpdatedBy(updatedBy);
+        transactionDto.setUpdatedDate(new Date().getTime());
+        logger.debug("transactionDto for payments success update {}", transactionDto);
+        MerchantOrderPayments merchantOrderPayments = transactionMapper.transactionDtoToEntity(transactionDto);
+        MerchantOrderPayments merchantOrderPaymentsData = transactionRepository.save(merchantOrderPayments);
+        UpdateOrderStatusFailed(transactionDto);
+        logger.debug("After payments success update transactionData {}", merchantOrderPaymentsData);
+    }
+
+    public void UpdateOrderStatusFailed(TransactionDto transactionDto) {
+        Order order = orderDao.getOrderDetails(transactionDto);
+        //   if (order.getOrderRetryCount() <= 0) {
+        order.setStatus(OrderStatus.FAILED);
+        order.setUpdatedBy(transactionDto.getUpdatedBy());
+        order.setUpdatedDate(transactionDto.getUpdatedDate());
+        orderRepository.save(order);
+        // }
+    }
+    public void updateUpiSuccessTransactionStatusGen(String paymentStatus, UpiMapDbResponseDto upiMapDbResponseDto, String updatedBy, Long updatedDate) {
+        TransactionDto transactionDto = transactionDao.getValidPaymentAckReq(upiMapDbResponseDto.getTxnrefNo(), PaymentStatus.BOOKED.toString());
+        transactionDto.setTransactionStatus(TransactionStatus.valueOf(paymentStatus));
+        transactionDto.setPaymentStatus(PaymentStatus.valueOf(paymentStatus));
+        transactionDto.setPayProcId(upiMapDbResponseDto.getPayProc());
+        transactionDto.setGtwMapId(upiMapDbResponseDto.getGtwMapId());
+        transactionDto.setDebitAmt(upiMapDbResponseDto.getAmount());
+        transactionDto.setBankReferenceNumber(upiMapDbResponseDto.getSbirefNo());
+        transactionDto.setUpdatedBy(updatedBy);
+        transactionDto.setUpdatedDate(updatedDate);
+        transactionDto.setPaymentSuccessDate(new Date());
+        MerchantOrderPayments merchantOrderPayments = transactionMapper.transactionDtoToEntity(transactionDto);
+        MerchantOrderPayments merchantOrderPaymentsData = transactionRepository.save(merchantOrderPayments);
+        logger.debug("After payments success update transactionData {}", merchantOrderPaymentsData);
+    }
+}
+
+============================================================
+InbEncryptionDecryptionUtil.java
+============================================================
+@Component
+@RequiredArgsConstructor
+public class InbEncryptionDecryptionUtil {
+}
+============================================================
+PaymentValidator.java
+============================================================
+package com.epay.payment.validator;
+
+import com.epay.payment.util.ErrorConstants;
+import com.epay.payment.util.PaymentConstants;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.stereotype.Component;
+
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.text.DecimalFormat;
+import java.text.MessageFormat;
+import java.util.Objects;
+
+/**
+ * Class Name:ErrorConstants
+ * *
+ * Description:
+ * *
+ * Author:VCE2645(Siddhesh Nikam)
+ * <p>
+ * Copyright (c) 2024 [State Bank of India]
+ * All right reserved
+ * *
+ * Version:1.0
+ */
+@Component
+public class PaymentValidator extends BaseValidator {
+
+    static DecimalFormat formatter = new DecimalFormat(PaymentConstants.TWO_DECIMAl_DIGIT);
+
+    public boolean checkSum(String bankChecksum, String createdChecksum) {
+        errorDtoList.clear();
+        return checkSumFieldMatched(bankChecksum, createdChecksum);
+    }
+
+    private boolean checkSumFieldMatched(String bankChecksum, String createdChecksum) {
+        return !bankChecksum.isEmpty() && bankChecksum.equals(createdChecksum);
+    }
+
+    public synchronized void validateDebitAmount(BigDecimal debitAmt) {
+        errorDtoList.clear();
+        validateAmountFormat(debitAmt);
+        throwIfErrors();
+
+    }
+    void validateAmountFormat(BigDecimal debitAmt) {
+        if (Objects.isNull(debitAmt) || (debitAmt.signum() <= 0)) {
+            addError(ErrorConstants.INVALID_ERROR_CODE, MessageFormat.format(ErrorConstants.INVALID_ERROR_MESSAGE, PaymentConstants.DEBIT_AMOUNT_CONST,PaymentConstants.DEBIT_AMOUNT_GREATER_ZERO_CONST));
+        }
+    }
+
+
+    public boolean validateWebAndDvAmt(BigDecimal webAmt, BigDecimal DvAmt) {
+        errorDtoList.clear();
+        return  validateWebAndDVAmtFormat(webAmt,DvAmt);
+    }
+
+    public boolean validateWebAndDvUPIAmt(BigDecimal debtAmt,BigDecimal dbSplitAmt,BigDecimal webSplitAmt, BigDecimal webAmt) {
+        errorDtoList.clear();
+        if(dbSplitAmt.compareTo(webSplitAmt)==0) {
+            return validateWebAndDVAmtFormat(webAmt, debtAmt.add(dbSplitAmt));
+        }
+        return false;
+    }
+
+    private synchronized boolean validateWebAndDVAmtFormat(BigDecimal webAmt, BigDecimal dvAmt) {
+        return (Objects.equals(new BigDecimal(formatter.format(webAmt)), new BigDecimal(formatter.format(dvAmt))));
+    }
+
+    // Ref no not blank, null and zero
+    public boolean ValidateBankReferenceNumber(String webSbiRefNo, String dvSbiRefNo) {
+        return StringUtils.isNotBlank(webSbiRefNo) && !webSbiRefNo.equals("0") && !dvSbiRefNo.equals("0");
+    }
+
+    // Ref no not blank, null and zero
+    public boolean ValidateWebResponseBankReferenceNumber(String webSbiRefNo) {
+        return StringUtils.isNotBlank(webSbiRefNo) && !webSbiRefNo.equals("0");
+    }
+
+    public String cardAmountConverter(BigDecimal debitAmount) {
+        errorDtoList.clear();
+        return cardAmountFieldValidation(debitAmount);
+    }
+
+    private String cardAmountFieldValidation(BigDecimal debitAmount) {
+        return  String.valueOf(debitAmount.multiply(new BigDecimal(PaymentConstants.HUNDRED)).setScale(0, RoundingMode.DOWN));
+    }
+
+    public boolean checkResponseParamData(String decryptedWebResponse) {
+               return decryptedWebResponse.contains(PaymentConstants.SBI_REF_NO) && decryptedWebResponse.contains(PaymentConstants.AMOUNT) && decryptedWebResponse.contains(PaymentConstants.TXN_REF_NO) && decryptedWebResponse.contains(PaymentConstants.STATUS) && decryptedWebResponse.contains(PaymentConstants.STATUS_DESC);
+    }
+    public boolean checkWalletResponseParamData(String decryptedWebResponse) {
+        return decryptedWebResponse.contains(PaymentConstants.WALLET_REF_NO) && decryptedWebResponse.contains(PaymentConstants.AMOUNT) && decryptedWebResponse.contains(PaymentConstants.WALLET_ORDERID) && decryptedWebResponse.contains(PaymentConstants.WALLET_STATUSCODE) && decryptedWebResponse.contains(PaymentConstants.WALLET_STATUSMESSAGE);
+    }
+
+}
+============================================================
+BaseValidator.java
+============================================================
+package com.epay.payment.validator;
+
+
+import com.epay.payment.dto.ErrorDto;
+import com.epay.payment.exceptions.ValidationException;
+import com.epay.payment.util.CashChallanErrorConstants;
+import com.epay.payment.util.ErrorConstants;
+import com.epay.payment.util.NeftChallanErrorConstants;
+import com.epay.payment.util.PaymentConstants;
+
+
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.EnumUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
+
+import java.math.BigDecimal;
+import java.text.MessageFormat;
+import java.util.*;
+import java.util.regex.Pattern;
+
+import static com.epay.payment.util.ErrorConstants.*;
+import static com.epay.payment.util.PaymentConstants.INCORRECT_FORMAT;
+
+/**
+ * Class Name:BaseValidator
+ * *
+ * Description: BaseValidator for payment service
+ * *
+ * Author: VCE2656 - Siddhesh Nikam (Dev Lead SBIePAY)
+ * Copyright (c) 2024 [State Bank of India]
+ * All rights reserved
+ * *
+ * Version:1.0
+ */
+public class BaseValidator {
+    private final LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+    List<ErrorDto> errorDtoList = new ArrayList<>();
+
+    /**
+     * Check mandatory field
+     *
+     * @param value     String
+     * @param fieldName String
+     */
+    protected void checkMandatoryField(String value, String fieldName) {
+        if (StringUtils.isEmpty(value) || StringUtils.equals(value, "null")) {
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+            throwIfErrors();
+        }
+    }
+
+    /**
+     * Check mandatory field
+     *
+     * @param value     UUID
+     * @param fieldName String
+     */
+    protected void checkMandatoryField(Object value, String fieldName) {
+        if (ObjectUtils.isEmpty(value)) {
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+            throwIfErrors();
+        }
+    }
+
+    /**
+     * Check mandatory collection
+     *
+     * @param collection Collection
+     * @param fieldName  String
+     */
+    protected void checkMandatoryCollection(Collection<?> collection, String fieldName) {
+        if (CollectionUtils.isEmpty(collection)) {
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+            throwIfErrors();
+        }
+    }
+
+    /**
+     * Check mandatary fields
+     *
+     * @param fieldName String
+     * @param values    String...
+     */
+    protected void checkMandatoryFields(String fieldName, String... values) {
+        boolean allEmpty = Arrays.stream(values).allMatch(StringUtils::isEmpty);
+        if (allEmpty) {
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+            throwIfErrors();
+        }
+    }
+
+    /**
+     * Check mandatory date field
+     *
+     * @param date      Long
+     * @param fieldName String
+     */
+    protected void checkMandatoryDateField(Long date, String fieldName) {
+        if (ObjectUtils.isEmpty(date) || date < 0) {
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+            throwIfErrors();
+        }
+    }
+
+    protected void validateFieldLength(String value, int maxLength, String fieldName) {
+        if (StringUtils.isNotEmpty(value) && value.length() != maxLength) {
+            addError(fieldName, ErrorConstants.FIXED_FIELD_LENGTH_ERROR_CODE, MessageFormat.format(ErrorConstants.FIXED_FIELD_LENGTH_ERROR_MESSAGE, fieldName, maxLength));
+            throwIfErrors();
+        }
+    }
+
+    protected void validateFieldLengthMax(String value, int maxLength, String fieldName) {
+        if (StringUtils.isNotEmpty(value) && value.length() > maxLength) {
+            addError(MAX_LENGTH_ERROR_CODE, MAX_LENGTH_ERROR_MESSAGE, fieldName, maxLength);
+            throwIfErrors();
+        }
+    }
+
+
+    protected void validateFieldWithRegex(String value, int maxLength, String regex, String fieldName, String message) {
+        if (StringUtils.isNotEmpty(value) && (value.length() > maxLength || validate(value, regex))) {
+            addError(fieldName, INVALID_ERROR_CODE, message + " " + maxLength);
+            throwIfErrors();
+        }
+    }
+
+    protected void validateFieldWithRegex(String value, String regex, String fieldName, String reason) {
+        if (StringUtils.isNotEmpty(value) && validate(value, regex)) {
+            addError(fieldName, INVALID_ERROR_CODE, MessageFormat.format(INVALID_ERROR_MESSAGE, fieldName, reason));
+            throwIfErrors();
+        }
+    }
+
+    protected void validateRefNoWithStatusRegex(String status, String sbirefNo,String fieldName) {
+        if ((status.equalsIgnoreCase(PaymentConstants.SUCCESS_CONST) && StringUtils.isBlank(sbirefNo)) || (status.equalsIgnoreCase(PaymentConstants.PENDING_CONST) && StringUtils.isBlank(sbirefNo))){
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+            throwIfErrors();
+        }
+    }
+
+    /**
+     * Validate if given
+     *
+     * @param enumName  String
+     * @param fieldName String
+     * @param enumClass Class
+     * @param <E>       Enum Class Name
+     */
+    protected <E extends Enum<E>> void validateFieldValue(String enumName, String fieldName, Class<E> enumClass) {
+        if (StringUtils.isNotEmpty(enumName) && !EnumUtils.isValidEnum(enumClass, enumName)) {
+            addError(INVALID_ERROR_CODE, INVALID_ERROR_MESSAGE, fieldName, PaymentConstants.VALID_VALUES_ARE + EnumUtils.getEnumList(enumClass).stream().map(Enum::name).toList());
+            throwIfErrors();
+        }
+    }
+
+    /**
+     * validate given field value from given list.
+     *
+     * @param value       String
+     * @param validValues List of values
+     * @param fieldName   String
+     */
+    protected void validateFieldValue(String value, List<String> validValues, String fieldName) {
+        boolean isValid = validValues.stream().anyMatch(validValue -> validValue.equalsIgnoreCase(value));
+        if (!isValid) {
+            addError(INVALID_ERROR_CODE, INVALID_ERROR_MESSAGE, fieldName, "Invalid format");
+            throwIfErrors();
+        }
+    }
+
+
+    protected boolean validate(String value, String regex) {
+        return !Pattern.matches(regex, value);
+    }
+
+    protected void checkForLeadingTrailingAndSingleSpace(String value, String fieldName) {
+        if ( StringUtils.isNotBlank(value) && !value.equals(value.trim())) {
+            addError(fieldName, ErrorConstants.TRAILING_SPACES_ERROR_CODE, ErrorConstants.TRAILING_SPACES_ERROR_MESSAGE);
+            throwIfErrors();
+        }
+    }
+
+
+    protected void validateAmount(BigDecimal amount, String fieldName) {
+        if (amount.signum() <= 0) {
+            errorDtoList.clear();
+            addError(fieldName, INVALID_ERROR_CODE, MessageFormat.format(INVALID_ERROR_MESSAGE, fieldName, "Amount must be greater than 0"));
+            throwIfErrors();
+        } else if(amount.scale() > 2){
+            logger.info("validate Payment Initiation, Validating up to 2 decimal point: {}",amount);
+            errorDtoList.clear();
+            addError(INVALID_ERROR_CODE, MessageFormat.format(INVALID_ERROR_MESSAGE, fieldName, "Validating up to 2 decimal point"));
+            throwIfErrors();
+        }else if (StringUtils.isNotEmpty(amount.toString()) && (amount.precision()- amount.scale()) > 18) {
+            logger.info("field {} exceeds maxLength {}", fieldName, 18);
+            addError(INVALID_ERROR_CODE, "The maximum allowed length for Debit amount before decimal is 18.");
+            throwIfErrors();
+        }else {
+            validateFieldWithRegex(amount.toString(), PaymentConstants.AMOUNT_REGEX, fieldName, INCORRECT_FORMAT);
+            throwIfErrors();
+        }
+    }
+
+    protected void checkAllCaps(String value, String field) {
+        if (!value.matches(PaymentConstants.CAPS_REGEX)) {
+            addError(field, ErrorConstants.INVALID_ERROR_CODE, MessageFormat.format(ErrorConstants.INVALID_ERROR_MESSAGE, field, "field should be capital only"));
+            throwIfErrors();
+        }
+    }
+
+    protected void addError(String fieldName, String errorCode, String errorMessage) {
+        errorDtoList.add(ErrorDto.builder().errorCode(errorCode).errorMessage(MessageFormat.format(errorMessage, fieldName)).build());
+    }
+
+    protected void addError(String errorCode, String errorMessage, Object... fieldNames) {
+        errorDtoList.add(ErrorDto.builder().errorCode(errorCode).errorMessage(MessageFormat.format(errorMessage, fieldNames)).build());
+    }
+
+    protected void throwIfErrors() {
+        if (CollectionUtils.isNotEmpty(errorDtoList)) {
+            throw new ValidationException(errorDtoList);
+        }
+    }
+
+    public void validateNBAmountCallBack(String amount,String fieldName) {
+        if (PaymentConstants.NA.equalsIgnoreCase(amount)) {
+            errorDtoList.clear();
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+        } else if (!StringUtils.isNotBlank(amount)) {
+            errorDtoList.clear();
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+        } else if (!amount.matches(PaymentConstants.NUMBER_DECIMAL_REGEX)) {
+            errorDtoList.clear();
+            validateFieldWithRegex(amount, PaymentConstants.NUMBER_DECIMAL_REGEX, fieldName, INCORRECT_FORMAT);
+            throwIfErrors();
+        } else if (new BigDecimal(amount).signum() <= 0) {
+            errorDtoList.clear();
+            addError(fieldName, INVALID_ERROR_CODE, MessageFormat.format(INVALID_ERROR_MESSAGE, fieldName, "Amount must be greater than 0"));
+            throwIfErrors();
+        } else if(new BigDecimal(amount).scale() > 2){
+            logger.info("validate Payment Initiation, Validating up to 2 decimal point: {}",new BigDecimal(amount));
+            errorDtoList.clear();
+            addError(INVALID_ERROR_CODE, MessageFormat.format(INVALID_ERROR_MESSAGE, fieldName, "Validating up to 2 decimal point"));
+            throwIfErrors();
+        }else if (StringUtils.isNotEmpty(new BigDecimal(amount).toString()) && (new BigDecimal(amount).precision()- new BigDecimal(amount).scale()) > 18) {
+            errorDtoList.clear();
+            logger.info("field {} exceeds maxLength {}", fieldName, 18);
+            addError(INVALID_ERROR_CODE, "The maximum allowed length for Debit amount before decimal is 18.");
+            throwIfErrors();
+        }  else {
+            errorDtoList.clear();
+            validateFieldWithRegex(amount, PaymentConstants.AMOUNT_REGEX, fieldName, INCORRECT_FORMAT);
+            throwIfErrors();
+        }
+    }
+
+    public void validateNBRequiredCallBack(String value, String fieldName) {
+        if (value == null) {
+            errorDtoList.clear();
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, MessageFormat.format(ErrorConstants.REQUIRED_ERROR_MESSAGE, fieldName));
+            throwIfErrors();
+        }
+        if ((fieldName.equalsIgnoreCase(PaymentConstants.STATUS) && !PaymentConstants.SUCCESS.equalsIgnoreCase(value))
+                && !PaymentConstants.FAILURE.equalsIgnoreCase(value)
+                && !PaymentConstants.PENDING_CONST.equalsIgnoreCase(value)
+                && value.length() <=25){
+            errorDtoList.clear();
+            addError(fieldName, INVALID_ERROR_CODE, MessageFormat.format(INVALID_ERROR_MESSAGE, fieldName, PaymentConstants.INVALID_TXN_STATUS_FORMAT));
+            throwIfErrors();
+        }
+    }
+
+    /**
+     * Cash Challan Validation
+     *
+     * @param value     String
+     * @param fieldName String
+     */
+    protected void checkMandatoryFieldForCash(String value, String fieldName) {
+        if (StringUtils.isEmpty(value) || StringUtils.equals(value, "null")) {
+            addError(fieldName, CashChallanErrorConstants.REQUIRED_ERROR_CODE, CashChallanErrorConstants.REQUIRED_ERROR_MESSAGE);
+        }
+    }
+
+    protected void checkForLeadingTrailingAndSingleSpaceForCash(String value, String fieldName) {
+        if ( StringUtils.isNotBlank(value) && !value.equals(value.trim())) {
+            addError(fieldName, CashChallanErrorConstants.TRAILING_SPACES_ERROR_CODE, CashChallanErrorConstants.TRAILING_SPACES_ERROR_MESSAGE);
+        }
+    }
+
+    protected void validateFieldLengthForCash(String value, int maxLength, String fieldName) {
+        if (StringUtils.isNotEmpty(value) && value.length() != maxLength) {
+            addError(fieldName, CashChallanErrorConstants.FIXED_FIELD_LENGTH_ERROR_CODE, MessageFormat.format(CashChallanErrorConstants.FIXED_FIELD_LENGTH_ERROR_MESSAGE, fieldName, maxLength));
+        }
+    }
+
+    protected void validateFieldLengthMaxForCash(String value, int maxLength, String fieldName) {
+        if (StringUtils.isNotEmpty(value) && value.length() > maxLength) {
+            addError(CashChallanErrorConstants.MAX_LENGTH_ERROR_CODE, CashChallanErrorConstants.MAX_LENGTH_ERROR_MESSAGE, fieldName, maxLength);
+        }
+    }
+
+    protected void validateFieldWithRegexForCash(String value, String regex, String fieldName, String reason) {
+        if (StringUtils.isNotEmpty(value) && validate(value, regex)) {
+            addError(fieldName, CashChallanErrorConstants.INVALID_ERROR_CODE, MessageFormat.format(CashChallanErrorConstants.INVALID_ERROR_MESSAGE, fieldName, reason));
+        }
+    }
+
+    /**
+     * NEFT Challan Validation
+     *
+     * @param value     String
+     * @param fieldName String
+     */
+
+    protected void checkForLeadingTrailingAndSingleSpaceForNeft(String value, String fieldName) {
+        if ( StringUtils.isNotBlank(value) && !value.equals(value.trim())) {
+            addError(fieldName, NeftChallanErrorConstants.TRAILING_SPACES_ERROR_CODE, NeftChallanErrorConstants.TRAILING_SPACES_ERROR_MESSAGE);
+        }
+    }
+
+    protected void validateFieldLengthForNeft(String value, int maxLength, String fieldName) {
+        if (StringUtils.isNotEmpty(value) && value.length() != maxLength) {
+            addError(fieldName, NeftChallanErrorConstants.FIXED_FIELD_LENGTH_ERROR_CODE, MessageFormat.format(NeftChallanErrorConstants.FIXED_FIELD_LENGTH_ERROR_MESSAGE, fieldName, maxLength));
+        }
+    }
+
+    protected void validateFieldLengthMaxForNeft(String value, int maxLength, String fieldName) {
+        if (StringUtils.isNotEmpty(value) && value.length() > maxLength) {
+            addError(NeftChallanErrorConstants.MAX_LENGTH_ERROR_CODE, NeftChallanErrorConstants.MAX_LENGTH_ERROR_MESSAGE, fieldName, maxLength);
+        }
+    }
+
+    protected void validateFieldWithRegexForNeft(String value, String regex, String fieldName, String reason) {
+        if (StringUtils.isNotEmpty(value) && validate(value, regex)) {
+            addError(fieldName, NeftChallanErrorConstants.INVALID_ERROR_CODE, MessageFormat.format(NeftChallanErrorConstants.INVALID_ERROR_MESSAGE, fieldName, reason));
+        }
+    }
+}
+
+============================================================
+NbPaymentDao.java
+============================================================
+package com.epay.payment.dao;
+
+import com.epay.payment.dto.NbMapWebResponseDto;
+import com.epay.payment.exceptions.PaymentException;
+import com.epay.payment.util.InbEncryptionDecryptionUtil;
+import com.epay.payment.util.InbErrorConstants;
+import com.epay.payment.util.PaymentConstants;
+import com.epay.payment.util.enums.PaymentStatus;
+import com.epay.payment.validator.PaymentValidator;
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+
+import java.math.BigDecimal;
+import java.text.MessageFormat;
+
+/**
+ * Class Name: NbPaymentDao
+ * *
+ * Description:
+ * *
+ * Author: VCE2645(Siddhesh Nikam)
+ * Copyright (c) 2024 [State Bank of India]
+ * ALl rights reserved
+ * *
+ * Version: 1.0
+ */
+@Component
+@RequiredArgsConstructor
+public class NbPaymentDao {
+
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+    private final PaymentDao paymentDao;
+    private final InbEncryptionDecryptionUtil inbEncryptionDecryptionUtil;
+    private final PaymentValidator paymentValidator;
+    private final StatusUpdatePaymentDao statusUpdatePaymentDao;
+
+    /**
+     * @return -JSON : Web or DV Status and ATRN.
+     * @methodName: Process Web Response Payload.
+     * @@Method-Description: Switch case when webResponse success or pending else fail.
+     * @param: processNbDoubleVerRequest
+     * @Exception or @Error :Exception
+     */
+
+    public String processInbDoubleVerRequest(NbMapWebResponseDto nbMapWebResponseDto) {
+        return getCallBackResponse(nbMapWebResponseDto.getTxnrefNo(),nbMapWebResponseDto.getAmount());
+    }
+
+    public NbMapWebResponseDto processNbDoubleVerRequest(NbMapWebResponseDto nbMapWebResponseDto, NbMapWebResponseDto nbMapDVResponseDto, String inbDvResponse) {
+        //Save DV Response in DB
+        paymentDao.saveResponseLog(inbDvResponse, nbMapDVResponseDto.getTxnrefNo(), nbMapDVResponseDto.getSbirefNo(), PaymentConstants.DV_RESPONSE_TYPE, PaymentConstants.CREATED_BY);
+        // Validation call checksum, bank ref number, amount
+                validateCallBackResponse(nbMapWebResponseDto, nbMapDVResponseDto, inbDvResponse); // Check Method...
+        //in web or dv response trace no is null or zero then mark txn as fail.
+                switch (nbMapDVResponseDto.getStatus()) {
+                    case PaymentConstants.SUCCESS_CONST -> {
+                        logger.info("Payment Callback DV SBI-INB SUCCESS_CONST {} " , nbMapDVResponseDto);
+                        statusUpdatePaymentDao.paymentSuccessPendingStatusUpdateGen(PaymentStatus.SUCCESS.toString(), nbMapDVResponseDto.getTxnrefNo(),  nbMapDVResponseDto.getSbirefNo(),PaymentConstants.SBI_NET_BANKING,PaymentConstants.NB_CONST);
+                        return nbMapDVResponseDto;
+                    }
+                    case PaymentConstants.PENDING_CONST -> {
+                        logger.info("Payment Callback DV SBI-INB PENDING_CONST {} " , nbMapDVResponseDto);
+                        statusUpdatePaymentDao.paymentSuccessPendingStatusUpdateGen(PaymentStatus.PENDING.toString(), nbMapDVResponseDto.getTxnrefNo(),  nbMapDVResponseDto.getSbirefNo(),PaymentConstants.SBI_NET_BANKING,PaymentConstants.NB_CONST);
+                        return nbMapDVResponseDto;
+                    }
+                    case PaymentConstants.FAILURE_CONST -> {
+                        logger.info("Payment Callback DV SBI-INB FAILURE_CONST {} " , nbMapDVResponseDto);
+                        statusUpdatePaymentDao.paymentFailureStatusUpdate(nbMapDVResponseDto.getTxnrefNo(),nbMapDVResponseDto.getSbirefNo(),nbMapDVResponseDto.getStatus_desc(),PaymentConstants.SBI_NET_BANKING);
+                        return nbMapDVResponseDto;
+                    }
+                    default -> {
+                        logger.info("Payment Callback DV SBI-INB default {} " , nbMapDVResponseDto);
+                        statusUpdatePaymentDao.paymentFailureStatusUpdate(nbMapDVResponseDto.getTxnrefNo(),nbMapDVResponseDto.getSbirefNo(),nbMapDVResponseDto.getStatus_desc(),PaymentConstants.SBI_NET_BANKING);
+                        return nbMapDVResponseDto;
+                    }
+                }
+        }
+
+private String getCallBackResponse(String txnRefNo, BigDecimal amount){
+    // Create DV request and checksum.
+    String plainDvRequestAndChecksum  = MessageFormat.format(PaymentConstants.SBIINB_DV_REQUEST,txnRefNo,amount.toString().replaceAll(PaymentConstants.COMMA,PaymentConstants.EMPTY)).concat(PaymentConstants.SBIINB_CHECKSUM).concat(inbEncryptionDecryptionUtil.getSHA2Checksum(MessageFormat.format(PaymentConstants.SBIINB_DV_REQUEST,txnRefNo,amount.toString().replaceAll(PaymentConstants.COMMA,PaymentConstants.EMPTY))));
+    logger.info("Payment Callback Plain Double Verification Request and Checksum {} " + plainDvRequestAndChecksum);
+    // Save DV Request...
+    paymentDao.saveRequestLog(plainDvRequestAndChecksum,txnRefNo,PaymentConstants.DV_REQUEST_TYPE,PaymentConstants.CREATED_BY);
+    return plainDvRequestAndChecksum;
+    }
+
+    private void validateCallBackResponse(NbMapWebResponseDto nbMapWebResponseDto, NbMapWebResponseDto nbMapDVResponseDto, String inbDvResponse){
+        String plainDVCheckSumStr = (inbDvResponse.lastIndexOf(PaymentConstants.PIPE) != -1 ) ?  inbDvResponse.substring(0,inbDvResponse.lastIndexOf(PaymentConstants.PIPE)) : inbDvResponse;
+        logger.info("DV Payment Callback Decrypted Web Response plainCheckSumStr {} ", plainDVCheckSumStr);
+
+        logger.info("SBI INB DV Bank Created CheckSum String: {}, SBIePay Created Checksum string: {} ",nbMapDVResponseDto.getCheckSum(),inbEncryptionDecryptionUtil.getSHA2Checksum(plainDVCheckSumStr));
+
+        if (!paymentValidator.checkSum(nbMapDVResponseDto.getCheckSum(), inbEncryptionDecryptionUtil.getSHA2Checksum(plainDVCheckSumStr))) {
+            statusUpdatePaymentDao.paymentFailureStatusUpdate(nbMapWebResponseDto.getTxnrefNo(),nbMapWebResponseDto.getSbirefNo(), InbErrorConstants.DV_CHECKSUM_MISMATCH_ERROR_MESSAGE,PaymentConstants.SBI_NET_BANKING);
+            throw new PaymentException(InbErrorConstants.DV_CHECKSUM_ERROR_CODE, InbErrorConstants.DV_CHECKSUM_MISMATCH_ERROR_MESSAGE);
+        }
+
+        if (!paymentValidator.validateWebAndDvAmt(nbMapWebResponseDto.getAmount(), nbMapDVResponseDto.getAmount())) {
+            statusUpdatePaymentDao.paymentFailureStatusUpdate(nbMapWebResponseDto.getTxnrefNo(),nbMapWebResponseDto.getSbirefNo(), InbErrorConstants.AMOUNT_ERROR_MESSAGE,PaymentConstants.SBI_NET_BANKING);
+            throw new PaymentException(InbErrorConstants.AMOUNT_ERROR_CODE, InbErrorConstants.AMOUNT_ERROR_MESSAGE);
+        }
+        if (!paymentValidator.ValidateBankReferenceNumber(nbMapWebResponseDto.getSbirefNo(), nbMapDVResponseDto.getSbirefNo())) {
+            statusUpdatePaymentDao.paymentFailureStatusUpdate(nbMapWebResponseDto.getTxnrefNo(),nbMapWebResponseDto.getSbirefNo(), InbErrorConstants.BANK_REF_NO_ERROR_MESSAGE,PaymentConstants.SBI_NET_BANKING);
+            throw new PaymentException(InbErrorConstants.BANK_REF_NO_ERROR_CODE, InbErrorConstants.BANK_REF_NO_ERROR_MESSAGE);
+        }
+    }
+}
+============================================================
+StatusUpdatePaymentDao.java
+============================================================
+package com.epay.payment.dao;
+
+import com.epay.payment.dto.OtherInbMapResponseDto;
+import com.epay.payment.dto.PaymentOrderSummeryDto;
+import com.epay.payment.dto.TransactionDto;
+import com.epay.payment.dto.UpiMapDbResponseDto;
+import com.epay.payment.entity.Order;
+import com.epay.payment.entity.PaymentOrderSummary;
+import com.epay.payment.repository.OrderRepository;
+import com.epay.payment.util.PaymentConstants;
+import com.epay.payment.util.enums.OrderStatus;
+import com.epay.payment.util.enums.PaymentStatus;
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+
+import java.sql.Timestamp;
+import java.util.Optional;
+
+/**
+ * Class Name:StatusUpdatePaymentDao
+ * *
+ * Description:
+ * *
+ * Author:VCE2645(Siddhesh Nikam)
+ * <p>
+ * Copyright (c) 2024 [State Bank of India]
+ * All right reserved
+ * *
+ * Version:1.0
+ */
+
+@RequiredArgsConstructor
+@Service
+public class StatusUpdatePaymentDao {
+
+    private final TransactionDao transactionDao;
+    private final PaymentOrderSummeryDao paymentOrderSummeryDao;
+    private final OrderDao orderDao;
+    private final OrderRepository orderRepository;
+    private final PaymentDao paymentDao;
+
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+
+    public void paymentFailureStatusUpdate(String txnRefNo, String sbiRefNumber, String failureReason, String createdBy) {
+        logger.info("default Status Update DV txnRefNo. {}, sbiRefNumber.{}, failureReason. {}, createdBy. {}", txnRefNo, sbiRefNumber, failureReason, createdBy);
+        paymentDao.updateFailPendingTransactionStatusGen(PaymentStatus.FAILED.toString(), PaymentStatus.FAILED.toString(), sbiRefNumber, failureReason, txnRefNo, createdBy, new Timestamp(System.currentTimeMillis()).getTime());
+    }
+
+    public void paymentSuccessPendingStatusUpdateGen(String paymentStatus, String txnRefNo, String sbiRefNumber, String createdBy,String payMode) {
+        Order order = orderDao.getOrderDetails(transactionDao.getTransactionDetails(txnRefNo));
+        TransactionDto transactionDto1 = transactionDao.getTransactionDetails(txnRefNo);
+        if (OrderStatus.ATTEMPTED.equals(order.getStatus())) {
+            if(transactionDto1.getOrderAmount().equals(order.getOrderAmount())){
+                logger.debug("In paymentSuccessPendingStatusUpdateGen for update success for txnRefNo  {} ", txnRefNo);
+                paymentDao.updateSuccessTransactionStatusGen(paymentStatus, txnRefNo, sbiRefNumber, createdBy, new Timestamp(System.currentTimeMillis()).getTime());
+
+                if (!(String.valueOf(PaymentStatus.PENDING).equalsIgnoreCase(paymentStatus))) {
+                    TransactionDto transactionDto = transactionDao.getValidPaymentAckReq(txnRefNo, paymentStatus, payMode);
+                    updatePaymentOrderStatusPaid(transactionDto);
+                    Optional<PaymentOrderSummary> aggMerchantOrderSummery = paymentOrderSummeryDao.getDailyTxnAmtIs(PaymentOrderSummeryDto.builder().merchantId(transactionDto.getMerchantId()).paymodeCode(transactionDto.getPayMode()).build());
+                    PaymentOrderSummary aggMerchantOrderSummeryDetails = aggMerchantOrderSummery.orElseGet(() -> null);
+                    paymentOrderSummeryDao.updateTransactionSummary(transactionDto, aggMerchantOrderSummeryDetails);
+                }
+            }else {
+                logger.debug("In paymentSuccessPendingStatusUpdateGen for update failed for txnRefNo  {} ", txnRefNo);
+                updatePaymentFailureStatus(transactionDto1, PaymentConstants.FAILED_FOR_AMOUNT_NOT_MATCHED,payMode);
+            }
+        }
+    }
+
+    public void paymentUPISuccessPendingStatusUpdateGen(String paymentStatus, UpiMapDbResponseDto upiMapDbResponseDto, String createdBy, String UPI) {
+        Order order = orderDao.getOrderDetails(transactionDao.getTransactionDetails(upiMapDbResponseDto.getTxnrefNo()));
+        TransactionDto transactionDto1 = transactionDao.getTransactionDetails(upiMapDbResponseDto.getTxnrefNo());
+        if (OrderStatus.ATTEMPTED.equals(order.getStatus())) {
+            if(transactionDto1.getOrderAmount().equals(order.getOrderAmount())){
+                logger.debug("In paymentSuccessPendingStatusUpdateGen for update success for txnRefNo  {} ", upiMapDbResponseDto.getTxnrefNo());
+                paymentDao.updateUpiSuccessTransactionStatusGen(paymentStatus, upiMapDbResponseDto, createdBy, new Timestamp(System.currentTimeMillis()).getTime());
+
+                if (!(String.valueOf(PaymentStatus.PENDING).equalsIgnoreCase(paymentStatus))) {
+                    TransactionDto transactionDto = transactionDao.getValidPaymentAckReq(upiMapDbResponseDto.getTxnrefNo(), paymentStatus, upiMapDbResponseDto.getPayMode());
+                    updatePaymentOrderStatusPaid(transactionDto);
+                    Optional<PaymentOrderSummary> aggMerchantOrderSummery = paymentOrderSummeryDao.getDailyTxnAmtIs(PaymentOrderSummeryDto.builder().merchantId(transactionDto.getMerchantId()).paymodeCode(transactionDto.getPayMode()).build());
+                    PaymentOrderSummary aggMerchantOrderSummeryDetails = aggMerchantOrderSummery.orElseGet(() -> null);
+                    paymentOrderSummeryDao.updateTransactionSummary(transactionDto, aggMerchantOrderSummeryDetails);
+                }
+            }else {
+                logger.debug("In paymentSuccessPendingStatusUpdateGen for update failed for txnRefNo  {} ", upiMapDbResponseDto.getTxnrefNo());
+                updatePaymentFailureStatus(transactionDto1, PaymentConstants.FAILED_FOR_AMOUNT_NOT_MATCHED,upiMapDbResponseDto.getPayProc());
+            }
+        }
+    }
+
+
+
+    private void updatePaymentOrderStatusPaid(TransactionDto transactionDto) {
+        Order order = orderDao.getOrderDetails(transactionDto);
+            order.setStatus(OrderStatus.PAID);
+            order.setUpdatedBy(transactionDto.getUpdatedBy());
+            order.setUpdatedDate(transactionDto.getUpdatedDate());
+            orderRepository.save(order);
+    }
+
+    public void saveOtherInbAtrnDetails(OtherInbMapResponseDto otherInbMapResponseDto) {
+        paymentDao.saveOtherInbAtrnDetails(otherInbMapResponseDto);
+
+    }
+
+    public void updateBankRefNo(String txnRefNo, String refNumber, String updatedBy) {
+        paymentDao.saveBankRefNumber(txnRefNo,refNumber,updatedBy);
+    }
+
+    public void updatePaymentFailureStatus(TransactionDto transactionDto,  String failureReason,  String updatedBy) {
+        logger.debug("default Status Update  txnRefNo  {} ", transactionDto);
+        paymentDao.updateTransactionStatus(transactionDto,PaymentStatus.FAILED.toString(), PaymentStatus.FAILED.toString(), failureReason,updatedBy);
+    }
+}
+============================================================
+PaymentWebClientService.java
+============================================================
+@Component
+@RequiredArgsConstructor
+public class PaymentWebClientService {
+}
+============================================================
+OrderDao.java
+============================================================
+package com.epay.payment.dao;
+
+import com.epay.payment.dto.TransactionDto;
+import com.epay.payment.entity.MerchantOrderPayments;
+import com.epay.payment.entity.Order;
+import com.epay.payment.exceptions.PaymentException;
+import com.epay.payment.mapper.OrderMapper;
+import com.epay.payment.repository.OrderRepository;
+import com.epay.payment.util.ErrorConstants;
+import com.epay.payment.util.enums.OrderStatus;
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+
+import java.text.MessageFormat;
+import java.util.Optional;
+
+/**
+ * Class Name: OrderDao
+ * *
+ * Description:
+ * *
+ * Author: VCE2645(Siddhesh Nikam)
+ * Copyright (c) 2024 [State Bank of India]
+ * ALl rights reserved
+ * *
+ * Version: 1.0
+ */
+@Component
+@RequiredArgsConstructor
+public class OrderDao {
+
+    private final OrderRepository orderRepository;
+    private final LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+
+    public Order getOrderDetails(TransactionDto transactionDto) {
+
+        return orderRepository.findBySbiOrderRefNumberAndOrderRefNumber(transactionDto.getSbiOrderRefNumber(), transactionDto.getOrderRefNumber())
+                .orElseThrow(() -> new PaymentException(ErrorConstants.NOT_FOUND_ERROR_CODE, MessageFormat
+                        .format(ErrorConstants.NOT_FOUND_ERROR_MESSAGE, "Order")));
+    }
+
+
+}
+============================================================
+PaymentInbValidator.java
+============================================================
+package com.epay.payment.validator;
+
+import com.epay.payment.dto.NbMapWebResponseDto;
+import com.epay.payment.dto.OtherInbMapResponseDto;
+import com.epay.payment.model.request.PaymentInitiationRequest;
+import com.epay.payment.util.PaymentConstants;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+
+import java.math.BigDecimal;
+
+import static com.epay.payment.util.PaymentConstants.*;
+
+/**
+ * Class Name: PaymentInitiationValidator
+ * *
+ * Description:
+ * *
+ * Author: VCE2645(Siddhesh Nikam)
+ * Copyright (c) 2024 [State Bank of India]
+ * ALl rights reserved
+ * *
+ * Version: 1.0
+ */
+@Component
+@RequiredArgsConstructor
+public class PaymentInbValidator extends BaseValidator {
+
+    //INB and Other INB
+
+    public void validateNBRequest(PaymentInitiationRequest paymentInitiationRequest) {
+        errorDtoList.clear();
+        checkMandatoryField(paymentInitiationRequest.getAtrn(), PaymentConstants.ATRN_CONST);
+
+        checkForLeadingTrailingAndSingleSpace(paymentInitiationRequest.getAtrn(), PaymentConstants.ATRN_CONST);
+
+        validateFieldLength(paymentInitiationRequest.getAtrn(), ATRN_LENGTH, PaymentConstants.ATRN_CONST);
+
+        validateFieldWithRegex(paymentInitiationRequest.getAtrn(), PaymentConstants.ATRN_ARRN_REGEX_DIGIT, PaymentConstants.ATRN_CONST, PaymentConstants.INVALID_ATRN_CONST);
+    }
+
+    //INB end Request Validation
+
+    //INB Callback validation start
+
+    public void validateNBCallBack(NbMapWebResponseDto nbCallBackResponse) {
+        errorDtoList.clear();
+
+        checkMandatoryField(nbCallBackResponse.getAmount(), PaymentConstants.AMOUNT);
+        checkMandatoryField(nbCallBackResponse.getTxnrefNo(), PaymentConstants.TXN_REF_NO);
+        checkMandatoryField(nbCallBackResponse.getStatus(), PaymentConstants.STATUS);
+        checkMandatoryField(nbCallBackResponse.getStatus_desc(), PaymentConstants.STATUS_DESC);
+        checkMandatoryField(nbCallBackResponse.getCheckSum(), PaymentConstants.CHECKSUM_CONST);
+
+        checkForLeadingTrailingAndSingleSpace(nbCallBackResponse.getSbirefNo(), PaymentConstants.SBI_REF_NO);
+        checkForLeadingTrailingAndSingleSpace(String.valueOf(nbCallBackResponse.getAmount()), PaymentConstants.AMOUNT);
+        checkForLeadingTrailingAndSingleSpace(nbCallBackResponse.getTxnrefNo(), PaymentConstants.TXN_REF_NO);
+        checkForLeadingTrailingAndSingleSpace(nbCallBackResponse.getStatus(), PaymentConstants.STATUS);
+        checkForLeadingTrailingAndSingleSpace(nbCallBackResponse.getCheckSum(), PaymentConstants.CHECKSUM_CONST);
+
+        validateFieldWithRegex(nbCallBackResponse.getTxnrefNo(), PaymentConstants.ATRN_ARRN_REGEX_DIGIT_CONST, PaymentConstants.ATRN_CONST,PaymentConstants.INVALID_ATRN_CONST);
+
+        validateFieldLength(nbCallBackResponse.getTxnrefNo(), ATRN_LENGTH, PaymentConstants.ATRN_CONST);
+        validateFieldLengthMax(nbCallBackResponse.getSbirefNo(), SBI_REF_NO_LENGTH, PaymentConstants.SBI_REF_NO);
+        validateFieldLengthMax(nbCallBackResponse.getStatus(), STATUS_LENGTH, PaymentConstants.STATUS);
+        validateFieldLengthMax(nbCallBackResponse.getStatus_desc(), STATUS_DESC_LENGTH, PaymentConstants.STATUS_DESC);
+        validateFieldLengthMax(nbCallBackResponse.getCheckSum(), CHECKSUM_LENGTH, PaymentConstants.CHECKSUM_CONST);
+
+        validateFieldWithRegex(nbCallBackResponse.getSbirefNo(), PaymentConstants.SBI_REF_NO_REGEX, PaymentConstants.SBI_REF_NO,PaymentConstants.INVALID_SBI_REF_NO_FORMAT);
+        validateAmount(new BigDecimal(String.valueOf(nbCallBackResponse.getAmount())), PaymentConstants.AMOUNT_CONST);
+        validateFieldWithRegex(nbCallBackResponse.getStatus(), PaymentConstants.SBI_INB_STATUS_REGEX, PaymentConstants.STATUS,PaymentConstants.INVALID_TXN_STATUS_FORMAT);
+        validateFieldWithRegex(nbCallBackResponse.getStatus_desc(), PaymentConstants.SBI_INB_STATUS_DESC_REGEX, PaymentConstants.STATUS_DESC,PaymentConstants.INVALID_TXN_STATUS_DESC_FORMAT);
+
+        validateRefNoWithStatusRegex(nbCallBackResponse.getStatus(),nbCallBackResponse.getSbirefNo(),PaymentConstants.SBI_REF_NO);
+    }
+
+    //INB Callback validation End
+
+    // Other INB callback validation Start
+    public void validateOtherInbCallBack(OtherInbMapResponseDto otherInbCallBackResponse) {
+
+        errorDtoList.clear();
+        validateFieldWithRegex(String.valueOf(otherInbCallBackResponse.getAmount()), PaymentConstants.AMOUNT_REGEX, PaymentConstants.AMOUNT, PaymentConstants.INVALID_TXN_AMT_FORMAT);
+    }
+
+    // Other INB callback validation End
+}
+============================================================
+BaseValidator.java
+============================================================
+package com.epay.payment.validator;
+
+
+import com.epay.payment.dto.ErrorDto;
+import com.epay.payment.exceptions.ValidationException;
+import com.epay.payment.util.CashChallanErrorConstants;
+import com.epay.payment.util.ErrorConstants;
+import com.epay.payment.util.NeftChallanErrorConstants;
+import com.epay.payment.util.PaymentConstants;
+
+
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.EnumUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
+
+import java.math.BigDecimal;
+import java.text.MessageFormat;
+import java.util.*;
+import java.util.regex.Pattern;
+
+import static com.epay.payment.util.ErrorConstants.*;
+import static com.epay.payment.util.PaymentConstants.INCORRECT_FORMAT;
+
+/**
+ * Class Name:BaseValidator
+ * *
+ * Description: BaseValidator for payment service
+ * *
+ * Author: VCE2656 - Siddhesh Nikam (Dev Lead SBIePAY)
+ * Copyright (c) 2024 [State Bank of India]
+ * All rights reserved
+ * *
+ * Version:1.0
+ */
+public class BaseValidator {
+    private final LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+    List<ErrorDto> errorDtoList = new ArrayList<>();
+
+    /**
+     * Check mandatory field
+     *
+     * @param value     String
+     * @param fieldName String
+     */
+    protected void checkMandatoryField(String value, String fieldName) {
+        if (StringUtils.isEmpty(value) || StringUtils.equals(value, "null")) {
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+            throwIfErrors();
+        }
+    }
+
+    /**
+     * Check mandatory field
+     *
+     * @param value     UUID
+     * @param fieldName String
+     */
+    protected void checkMandatoryField(Object value, String fieldName) {
+        if (ObjectUtils.isEmpty(value)) {
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+            throwIfErrors();
+        }
+    }
+
+    /**
+     * Check mandatory collection
+     *
+     * @param collection Collection
+     * @param fieldName  String
+     */
+    protected void checkMandatoryCollection(Collection<?> collection, String fieldName) {
+        if (CollectionUtils.isEmpty(collection)) {
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+            throwIfErrors();
+        }
+    }
+
+    /**
+     * Check mandatary fields
+     *
+     * @param fieldName String
+     * @param values    String...
+     */
+    protected void checkMandatoryFields(String fieldName, String... values) {
+        boolean allEmpty = Arrays.stream(values).allMatch(StringUtils::isEmpty);
+        if (allEmpty) {
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+            throwIfErrors();
+        }
+    }
+
+    /**
+     * Check mandatory date field
+     *
+     * @param date      Long
+     * @param fieldName String
+     */
+    protected void checkMandatoryDateField(Long date, String fieldName) {
+        if (ObjectUtils.isEmpty(date) || date < 0) {
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+            throwIfErrors();
+        }
+    }
+
+    protected void validateFieldLength(String value, int maxLength, String fieldName) {
+        if (StringUtils.isNotEmpty(value) && value.length() != maxLength) {
+            addError(fieldName, ErrorConstants.FIXED_FIELD_LENGTH_ERROR_CODE, MessageFormat.format(ErrorConstants.FIXED_FIELD_LENGTH_ERROR_MESSAGE, fieldName, maxLength));
+            throwIfErrors();
+        }
+    }
+
+    protected void validateFieldLengthMax(String value, int maxLength, String fieldName) {
+        if (StringUtils.isNotEmpty(value) && value.length() > maxLength) {
+            addError(MAX_LENGTH_ERROR_CODE, MAX_LENGTH_ERROR_MESSAGE, fieldName, maxLength);
+            throwIfErrors();
+        }
+    }
+
+
+    protected void validateFieldWithRegex(String value, int maxLength, String regex, String fieldName, String message) {
+        if (StringUtils.isNotEmpty(value) && (value.length() > maxLength || validate(value, regex))) {
+            addError(fieldName, INVALID_ERROR_CODE, message + " " + maxLength);
+            throwIfErrors();
+        }
+    }
+
+    protected void validateFieldWithRegex(String value, String regex, String fieldName, String reason) {
+        if (StringUtils.isNotEmpty(value) && validate(value, regex)) {
+            addError(fieldName, INVALID_ERROR_CODE, MessageFormat.format(INVALID_ERROR_MESSAGE, fieldName, reason));
+            throwIfErrors();
+        }
+    }
+
+    protected void validateRefNoWithStatusRegex(String status, String sbirefNo,String fieldName) {
+        if ((status.equalsIgnoreCase(PaymentConstants.SUCCESS_CONST) && StringUtils.isBlank(sbirefNo)) || (status.equalsIgnoreCase(PaymentConstants.PENDING_CONST) && StringUtils.isBlank(sbirefNo))){
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+            throwIfErrors();
+        }
+    }
+
+    /**
+     * Validate if given
+     *
+     * @param enumName  String
+     * @param fieldName String
+     * @param enumClass Class
+     * @param <E>       Enum Class Name
+     */
+    protected <E extends Enum<E>> void validateFieldValue(String enumName, String fieldName, Class<E> enumClass) {
+        if (StringUtils.isNotEmpty(enumName) && !EnumUtils.isValidEnum(enumClass, enumName)) {
+            addError(INVALID_ERROR_CODE, INVALID_ERROR_MESSAGE, fieldName, PaymentConstants.VALID_VALUES_ARE + EnumUtils.getEnumList(enumClass).stream().map(Enum::name).toList());
+            throwIfErrors();
+        }
+    }
+
+    /**
+     * validate given field value from given list.
+     *
+     * @param value       String
+     * @param validValues List of values
+     * @param fieldName   String
+     */
+    protected void validateFieldValue(String value, List<String> validValues, String fieldName) {
+        boolean isValid = validValues.stream().anyMatch(validValue -> validValue.equalsIgnoreCase(value));
+        if (!isValid) {
+            addError(INVALID_ERROR_CODE, INVALID_ERROR_MESSAGE, fieldName, "Invalid format");
+            throwIfErrors();
+        }
+    }
+
+
+    protected boolean validate(String value, String regex) {
+        return !Pattern.matches(regex, value);
+    }
+
+    protected void checkForLeadingTrailingAndSingleSpace(String value, String fieldName) {
+        if ( StringUtils.isNotBlank(value) && !value.equals(value.trim())) {
+            addError(fieldName, ErrorConstants.TRAILING_SPACES_ERROR_CODE, ErrorConstants.TRAILING_SPACES_ERROR_MESSAGE);
+            throwIfErrors();
+        }
+    }
+
+
+    protected void validateAmount(BigDecimal amount, String fieldName) {
+        if (amount.signum() <= 0) {
+            errorDtoList.clear();
+            addError(fieldName, INVALID_ERROR_CODE, MessageFormat.format(INVALID_ERROR_MESSAGE, fieldName, "Amount must be greater than 0"));
+            throwIfErrors();
+        } else if(amount.scale() > 2){
+            logger.info("validate Payment Initiation, Validating up to 2 decimal point: {}",amount);
+            errorDtoList.clear();
+            addError(INVALID_ERROR_CODE, MessageFormat.format(INVALID_ERROR_MESSAGE, fieldName, "Validating up to 2 decimal point"));
+            throwIfErrors();
+        }else if (StringUtils.isNotEmpty(amount.toString()) && (amount.precision()- amount.scale()) > 18) {
+            logger.info("field {} exceeds maxLength {}", fieldName, 18);
+            addError(INVALID_ERROR_CODE, "The maximum allowed length for Debit amount before decimal is 18.");
+            throwIfErrors();
+        }else {
+            validateFieldWithRegex(amount.toString(), PaymentConstants.AMOUNT_REGEX, fieldName, INCORRECT_FORMAT);
+            throwIfErrors();
+        }
+    }
+
+    protected void checkAllCaps(String value, String field) {
+        if (!value.matches(PaymentConstants.CAPS_REGEX)) {
+            addError(field, ErrorConstants.INVALID_ERROR_CODE, MessageFormat.format(ErrorConstants.INVALID_ERROR_MESSAGE, field, "field should be capital only"));
+            throwIfErrors();
+        }
+    }
+
+    protected void addError(String fieldName, String errorCode, String errorMessage) {
+        errorDtoList.add(ErrorDto.builder().errorCode(errorCode).errorMessage(MessageFormat.format(errorMessage, fieldName)).build());
+    }
+
+    protected void addError(String errorCode, String errorMessage, Object... fieldNames) {
+        errorDtoList.add(ErrorDto.builder().errorCode(errorCode).errorMessage(MessageFormat.format(errorMessage, fieldNames)).build());
+    }
+
+    protected void throwIfErrors() {
+        if (CollectionUtils.isNotEmpty(errorDtoList)) {
+            throw new ValidationException(errorDtoList);
+        }
+    }
+
+    public void validateNBAmountCallBack(String amount,String fieldName) {
+        if (PaymentConstants.NA.equalsIgnoreCase(amount)) {
+            errorDtoList.clear();
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+        } else if (!StringUtils.isNotBlank(amount)) {
+            errorDtoList.clear();
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, ErrorConstants.REQUIRED_ERROR_MESSAGE);
+        } else if (!amount.matches(PaymentConstants.NUMBER_DECIMAL_REGEX)) {
+            errorDtoList.clear();
+            validateFieldWithRegex(amount, PaymentConstants.NUMBER_DECIMAL_REGEX, fieldName, INCORRECT_FORMAT);
+            throwIfErrors();
+        } else if (new BigDecimal(amount).signum() <= 0) {
+            errorDtoList.clear();
+            addError(fieldName, INVALID_ERROR_CODE, MessageFormat.format(INVALID_ERROR_MESSAGE, fieldName, "Amount must be greater than 0"));
+            throwIfErrors();
+        } else if(new BigDecimal(amount).scale() > 2){
+            logger.info("validate Payment Initiation, Validating up to 2 decimal point: {}",new BigDecimal(amount));
+            errorDtoList.clear();
+            addError(INVALID_ERROR_CODE, MessageFormat.format(INVALID_ERROR_MESSAGE, fieldName, "Validating up to 2 decimal point"));
+            throwIfErrors();
+        }else if (StringUtils.isNotEmpty(new BigDecimal(amount).toString()) && (new BigDecimal(amount).precision()- new BigDecimal(amount).scale()) > 18) {
+            errorDtoList.clear();
+            logger.info("field {} exceeds maxLength {}", fieldName, 18);
+            addError(INVALID_ERROR_CODE, "The maximum allowed length for Debit amount before decimal is 18.");
+            throwIfErrors();
+        }  else {
+            errorDtoList.clear();
+            validateFieldWithRegex(amount, PaymentConstants.AMOUNT_REGEX, fieldName, INCORRECT_FORMAT);
+            throwIfErrors();
+        }
+    }
+
+    public void validateNBRequiredCallBack(String value, String fieldName) {
+        if (value == null) {
+            errorDtoList.clear();
+            addError(fieldName, ErrorConstants.REQUIRED_ERROR_CODE, MessageFormat.format(ErrorConstants.REQUIRED_ERROR_MESSAGE, fieldName));
+            throwIfErrors();
+        }
+        if ((fieldName.equalsIgnoreCase(PaymentConstants.STATUS) && !PaymentConstants.SUCCESS.equalsIgnoreCase(value))
+                && !PaymentConstants.FAILURE.equalsIgnoreCase(value)
+                && !PaymentConstants.PENDING_CONST.equalsIgnoreCase(value)
+                && value.length() <=25){
+            errorDtoList.clear();
+            addError(fieldName, INVALID_ERROR_CODE, MessageFormat.format(INVALID_ERROR_MESSAGE, fieldName, PaymentConstants.INVALID_TXN_STATUS_FORMAT));
+            throwIfErrors();
+        }
+    }
+
+    /**
+     * Cash Challan Validation
+     *
+     * @param value     String
+     * @param fieldName String
+     */
+    protected void checkMandatoryFieldForCash(String value, String fieldName) {
+        if (StringUtils.isEmpty(value) || StringUtils.equals(value, "null")) {
+            addError(fieldName, CashChallanErrorConstants.REQUIRED_ERROR_CODE, CashChallanErrorConstants.REQUIRED_ERROR_MESSAGE);
+        }
+    }
+
+    protected void checkForLeadingTrailingAndSingleSpaceForCash(String value, String fieldName) {
+        if ( StringUtils.isNotBlank(value) && !value.equals(value.trim())) {
+            addError(fieldName, CashChallanErrorConstants.TRAILING_SPACES_ERROR_CODE, CashChallanErrorConstants.TRAILING_SPACES_ERROR_MESSAGE);
+        }
+    }
+
+    protected void validateFieldLengthForCash(String value, int maxLength, String fieldName) {
+        if (StringUtils.isNotEmpty(value) && value.length() != maxLength) {
+            addError(fieldName, CashChallanErrorConstants.FIXED_FIELD_LENGTH_ERROR_CODE, MessageFormat.format(CashChallanErrorConstants.FIXED_FIELD_LENGTH_ERROR_MESSAGE, fieldName, maxLength));
+        }
+    }
+
+    protected void validateFieldLengthMaxForCash(String value, int maxLength, String fieldName) {
+        if (StringUtils.isNotEmpty(value) && value.length() > maxLength) {
+            addError(CashChallanErrorConstants.MAX_LENGTH_ERROR_CODE, CashChallanErrorConstants.MAX_LENGTH_ERROR_MESSAGE, fieldName, maxLength);
+        }
+    }
+
+    protected void validateFieldWithRegexForCash(String value, String regex, String fieldName, String reason) {
+        if (StringUtils.isNotEmpty(value) && validate(value, regex)) {
+            addError(fieldName, CashChallanErrorConstants.INVALID_ERROR_CODE, MessageFormat.format(CashChallanErrorConstants.INVALID_ERROR_MESSAGE, fieldName, reason));
+        }
+    }
+
+    /**
+     * NEFT Challan Validation
+     *
+     * @param value     String
+     * @param fieldName String
+     */
+
+    protected void checkForLeadingTrailingAndSingleSpaceForNeft(String value, String fieldName) {
+        if ( StringUtils.isNotBlank(value) && !value.equals(value.trim())) {
+            addError(fieldName, NeftChallanErrorConstants.TRAILING_SPACES_ERROR_CODE, NeftChallanErrorConstants.TRAILING_SPACES_ERROR_MESSAGE);
+        }
+    }
+
+    protected void validateFieldLengthForNeft(String value, int maxLength, String fieldName) {
+        if (StringUtils.isNotEmpty(value) && value.length() != maxLength) {
+            addError(fieldName, NeftChallanErrorConstants.FIXED_FIELD_LENGTH_ERROR_CODE, MessageFormat.format(NeftChallanErrorConstants.FIXED_FIELD_LENGTH_ERROR_MESSAGE, fieldName, maxLength));
+        }
+    }
+
+    protected void validateFieldLengthMaxForNeft(String value, int maxLength, String fieldName) {
+        if (StringUtils.isNotEmpty(value) && value.length() > maxLength) {
+            addError(NeftChallanErrorConstants.MAX_LENGTH_ERROR_CODE, NeftChallanErrorConstants.MAX_LENGTH_ERROR_MESSAGE, fieldName, maxLength);
+        }
+    }
+
+    protected void validateFieldWithRegexForNeft(String value, String regex, String fieldName, String reason) {
+        if (StringUtils.isNotEmpty(value) && validate(value, regex)) {
+            addError(fieldName, NeftChallanErrorConstants.INVALID_ERROR_CODE, MessageFormat.format(NeftChallanErrorConstants.INVALID_ERROR_MESSAGE, fieldName, reason));
+        }
+    }
+}
+
+============================================================
+PaymentCallbackForwardService.java
+============================================================
+package com.epay.payment.service;
+
+import com.epay.payment.config.CardConfigDeatils;
+import com.epay.payment.dao.OrderDao;
+import com.epay.payment.dao.PaymentCallbackForwardDao;
+import com.epay.payment.dao.PaymentDao;
+import com.epay.payment.dto.TransactionDto;
+import com.epay.payment.entity.Order;
+import com.epay.payment.model.response.OrderInfo;
+import com.epay.payment.model.response.PaymentFinalResponse;
+import com.epay.payment.model.response.PaymentInfo;
+import com.epay.payment.model.response.PaymentStatusResponse;
+import com.epay.payment.model.response.PaymentResponse;
+import com.epay.payment.util.PaymentConstants;
+import com.epay.payment.util.PaymentUtil;
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
+
+import static com.epay.payment.util.EncryptionDecryptionUtil.encryptValue;
+
+/**
+ * Class Name: PaymentCallbackForwardService
+ * *
+ * PaymentCallbackForwardService is responsible for providing final response
+ * Author: VCE2656 - Vinod Bhosale
+ * Copyright (c) 2024 [State Bank of India]
+ * All rights reserved
+ * *
+ * Version:1.0
+ */
+@Service
+@RequiredArgsConstructor
+public class PaymentCallbackForwardService {
+    private final PaymentCallbackForwardDao paymentCallbackForwardDao;
+    private final LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+    private final CardConfigDeatils cardConfigDeatils;
+    private final PaymentDao paymentDao;
+    private final OrderDao orderDao;
+    /**
+     * @param paymentFinalResponse:
+     * @return RedirectView
+     */
+    public String processCallbackResponse(PaymentFinalResponse paymentFinalResponse, TransactionDto transactionDto, Order order) {
+        logger.info("Payment callback Start paymentFinalResponse {} ", paymentFinalResponse);
+        //get mek from Mid
+        String mek = paymentCallbackForwardDao.getMerchantMekKey(paymentFinalResponse.getMId());
+        //Create JsonArray Start...
+        OrderInfo orderInfo = OrderInfo.builder().sbiOrderId(paymentFinalResponse.getSbiOrderId() == null ? PaymentConstants.EMPTY : paymentFinalResponse.getSbiOrderId())
+                .orderRefNumber(paymentFinalResponse.getMerchantOrderNumber() == null ? PaymentConstants.EMPTY : paymentFinalResponse.getMerchantOrderNumber())
+                .orderStatus(String.valueOf(order.getStatus()) == null ? PaymentConstants.EMPTY : String.valueOf(order.getStatus()))
+                .currencyCode(transactionDto.getCurrencyCode() == null ? PaymentConstants.EMPTY : transactionDto.getCurrencyCode())
+                .otherDetails(paymentFinalResponse.getOtherDetails() == null ? PaymentConstants.EMPTY : paymentFinalResponse.getOtherDetails())
+                .build();
+
+        PaymentInfo paymentInfo = PaymentInfo.builder().atrnNumber(paymentFinalResponse.getAtrn() == null ? PaymentConstants.EMPTY : paymentFinalResponse.getAtrn())
+                .orderAmount(transactionDto.getOrderAmount() == null ? new BigDecimal(PaymentConstants.ZERO) : transactionDto.getOrderAmount())
+                .totalAmount(transactionDto.getDebitAmt() == null ? new BigDecimal(PaymentConstants.ZERO) : transactionDto.getDebitAmt())
+                .transactionStatus(transactionDto.getTransactionStatus() == null ? PaymentConstants.EMPTY : String.valueOf(transactionDto.getTransactionStatus()))
+                .payMode(transactionDto.getPayMode() == null ? PaymentConstants.EMPTY : transactionDto.getPayMode())
+                .bankName(paymentFinalResponse.getBankName() == null ? PaymentConstants.EMPTY : paymentFinalResponse.getBankName())
+                .bankTxnNumber(transactionDto.getBankReferenceNumber() == null ? PaymentConstants.EMPTY : transactionDto.getBankReferenceNumber())
+                .currencyCode(transactionDto.getCurrencyCode() == null ? PaymentConstants.EMPTY : transactionDto.getCurrencyCode())
+                .transactionTime(String.valueOf(transactionDto.getCreatedDate()) == null ? PaymentConstants.EMPTY : String.valueOf(transactionDto.getCreatedDate()))
+                .CIN(transactionDto.getCin() == null ? PaymentConstants.EMPTY : transactionDto.getCin())
+                .build();
+        PaymentStatusResponse paymentStatusResponseJsonString = PaymentStatusResponse.builder().orderInfo(orderInfo).paymentInfo(paymentInfo).orderRetryCount(paymentFinalResponse.getOrderRetryCount()).reason(paymentFinalResponse.getReason()).build();
+
+        //Return Response if merchant hosted
+        if(paymentDao.isMerchantHostedEnabled(transactionDto.getMerchantId())){
+            PaymentResponse<PaymentStatusResponse> callBackResponse = PaymentResponse.<PaymentStatusResponse>builder().data(List.of(paymentStatusResponseJsonString)).status(1).build();
+            return encryptValue(mek, PaymentUtil.toJson(callBackResponse));
+        }
+
+        List<PaymentStatusResponse> obj= new ArrayList<>();
+        obj.add(paymentStatusResponseJsonString);
+        logger.info("Plain FinalResponse For Posting to UI. {}",PaymentUtil.toJson(obj));
+
+        String encryptedFinalResponse = encryptValue(mek, PaymentUtil.toJson(obj));
+        logger.info("encryptedFinalResponse For Posting to UI. {}",encryptedFinalResponse);
+        //Create JsonArray End...
+
+        logger.info("Payment callback Start encryptedFinalResponse {} ", encryptedFinalResponse);
+        return paymentCallbackForwardDao.buildEncryptedResponse(paymentFinalResponse, encryptedFinalResponse, cardConfigDeatils.getMerchantResponseView(),transactionDto, order, mek);
+    }
+
+    /**
+     * This method will be used for merchant hosted.
+     * @param transactionDto
+     * @return
+     */
+    public String getRedirectionUrl(TransactionDto transactionDto){
+        Order order = orderDao.getOrderDetails(transactionDto);
+        return paymentDao.isMerchantHostedEnabled(order.getMId()) ? order.getReturnUrl() : cardConfigDeatils.getMerchantResponseView();
+    }
+
+   /**
+     * @param paymentFinalResponse:
+     * @return RedirectView
+     */
+    public String processInitiationResponse(PaymentFinalResponse paymentFinalResponse, TransactionDto transactionDto, Order order) {
+        logger.info("Payment callback Start paymentFinalResponse {} ", paymentFinalResponse);
+        //get mek from Mid
+        String mek = paymentCallbackForwardDao.getMerchantMekKey(paymentFinalResponse.getMId());
+        //Create JsonArray Start...
+        OrderInfo orderInfo = OrderInfo.builder().sbiOrderId(paymentFinalResponse.getSbiOrderId() == null ? PaymentConstants.EMPTY : paymentFinalResponse.getSbiOrderId())
+                .orderRefNumber(paymentFinalResponse.getMerchantOrderNumber() == null ? PaymentConstants.EMPTY : paymentFinalResponse.getMerchantOrderNumber())
+                .orderStatus(String.valueOf(order.getStatus()) == null ? PaymentConstants.EMPTY : String.valueOf(order.getStatus()))
+                .currencyCode(transactionDto.getCurrencyCode() == null ? PaymentConstants.EMPTY : transactionDto.getCurrencyCode())
+                .otherDetails(paymentFinalResponse.getOtherDetails() == null ? PaymentConstants.EMPTY : paymentFinalResponse.getOtherDetails())
+                .build();
+
+        PaymentInfo paymentInfo = PaymentInfo.builder().atrnNumber(paymentFinalResponse.getAtrn() == null ? PaymentConstants.EMPTY : paymentFinalResponse.getAtrn())
+                .orderAmount(transactionDto.getOrderAmount() == null ? new BigDecimal(PaymentConstants.ZERO) : transactionDto.getOrderAmount())
+                .totalAmount(transactionDto.getDebitAmt() == null ? new BigDecimal(PaymentConstants.ZERO) : transactionDto.getDebitAmt())
+                .transactionStatus(paymentFinalResponse.getTransactionStatus() == null ? PaymentConstants.EMPTY : paymentFinalResponse.getTransactionStatus())
+                .payMode(transactionDto.getPayMode() == null ? PaymentConstants.EMPTY : transactionDto.getPayMode())
+                .bankName(paymentFinalResponse.getBankName() == null ? PaymentConstants.EMPTY : paymentFinalResponse.getBankName())
+                .bankTxnNumber(transactionDto.getBankReferenceNumber() == null ? PaymentConstants.EMPTY : transactionDto.getBankReferenceNumber())
+                .currencyCode(transactionDto.getCurrencyCode() == null ? PaymentConstants.EMPTY : transactionDto.getCurrencyCode())
+                .transactionTime(String.valueOf(transactionDto.getCreatedDate()) == null ? PaymentConstants.EMPTY : String.valueOf(transactionDto.getCreatedDate()))
+                .CIN(transactionDto.getCin() == null ? PaymentConstants.EMPTY : transactionDto.getCin())
+                .build();
+        PaymentStatusResponse paymentStatusResponseJsonString = PaymentStatusResponse.builder().orderInfo(orderInfo).paymentInfo(paymentInfo).build();
+
+        List<PaymentStatusResponse> obj= new ArrayList<>();
+        obj.add(paymentStatusResponseJsonString);
+        logger.info("Plain FinalResponse For Posting to UI. {}",PaymentUtil.toJson(obj));
+
+        String encryptedFinalResponse = encryptValue(mek, PaymentUtil.toJson(obj));
+        logger.info("encryptedFinalResponse For Posting to UI. {}",encryptedFinalResponse);
+        //Create JsonArray End...
+
+        logger.info("Payment callback Start encryptedFinalResponse {} ", encryptedFinalResponse);
+        //return paymentCallbackForwardDao.buildEncryptedResponse(paymentFinalResponse, encryptedFinalResponse, cardConfigDeatils.getMerchantResponseView(),transactionDto,order);
+        return  encryptedFinalResponse;
+    }
+
+
+    /**
+     * @param paymentFinalResponse:
+     * @return RedirectView
+     */
+    public String processOfflinePaymodeCallbackResponse(PaymentFinalResponse paymentFinalResponse, TransactionDto transactionDto, Order order) {
+        logger.info("Payment callback Start processOfflinePaymodeCallbackResponse {} ", paymentFinalResponse);
+        //get mek from Mid
+        String mek = paymentCallbackForwardDao.getMerchantMekKey(paymentFinalResponse.getMId());
+        //Create JsonArray Start...
+        OrderInfo orderInfo = OrderInfo.builder().sbiOrderId(paymentFinalResponse.getSbiOrderId() == null ? PaymentConstants.EMPTY : paymentFinalResponse.getSbiOrderId())
+                .orderRefNumber(paymentFinalResponse.getMerchantOrderNumber() == null ? PaymentConstants.EMPTY : paymentFinalResponse.getMerchantOrderNumber())
+                .orderStatus(String.valueOf(order.getStatus()) == null ? PaymentConstants.EMPTY : String.valueOf(order.getStatus()))
+                .currencyCode(transactionDto.getCurrencyCode() == null ? PaymentConstants.EMPTY : transactionDto.getCurrencyCode())
+                .otherDetails(paymentFinalResponse.getOtherDetails() == null ? PaymentConstants.EMPTY : paymentFinalResponse.getOtherDetails())
+                .build();
+
+        PaymentInfo paymentInfo = PaymentInfo.builder().atrnNumber(paymentFinalResponse.getAtrn() == null ? PaymentConstants.EMPTY : paymentFinalResponse.getAtrn())
+                .orderAmount(transactionDto.getOrderAmount() == null ? new BigDecimal(PaymentConstants.ZERO) : transactionDto.getOrderAmount())
+                .totalAmount(transactionDto.getDebitAmt() == null ? new BigDecimal(PaymentConstants.ZERO) : transactionDto.getDebitAmt())
+                .transactionStatus(transactionDto.getTransactionStatus() == null ? PaymentConstants.EMPTY : String.valueOf(transactionDto.getTransactionStatus()))
+                .payMode(transactionDto.getPayMode() == null ? PaymentConstants.EMPTY : transactionDto.getPayMode())
+                .bankName(paymentFinalResponse.getBankName() == null ? PaymentConstants.EMPTY : paymentFinalResponse.getBankName())
+                .bankTxnNumber(transactionDto.getBankReferenceNumber() == null ? PaymentConstants.EMPTY : transactionDto.getBankReferenceNumber())
+                .currencyCode(transactionDto.getCurrencyCode() == null ? PaymentConstants.EMPTY : transactionDto.getCurrencyCode())
+                .transactionTime(String.valueOf(transactionDto.getCreatedDate()) == null ? PaymentConstants.EMPTY : String.valueOf(transactionDto.getCreatedDate()))
+                .CIN(transactionDto.getCin() == null ? PaymentConstants.EMPTY : transactionDto.getCin())
+                .build();
+        PaymentStatusResponse paymentStatusResponseJsonString = PaymentStatusResponse.builder().orderInfo(orderInfo).paymentInfo(paymentInfo).build();
+
+        List<PaymentStatusResponse> obj= new ArrayList<>();
+        obj.add(paymentStatusResponseJsonString);
+        logger.info("Plain FinalResponse For Posting to UI. {}",PaymentUtil.toJson(obj));
+
+        String encryptedFinalResponse = encryptValue(mek, PaymentUtil.toJson(obj));
+        logger.info("encryptedFinalResponse For Posting to UI. {}",encryptedFinalResponse);
+        //Create JsonArray End...
+
+        logger.info("Payment callback Start encryptedFinalResponse {} ", encryptedFinalResponse);
+        return encryptedFinalResponse;
+    }
+
+
+}
+
+============================================================
+PaymentCallbackForwardDao.java
+============================================================
+package com.epay.payment.dao;
+
+
+import com.epay.payment.config.CardConfigDeatils;
+import com.epay.payment.config.StandardConfig;
+import com.epay.payment.dto.CallBackPaymentFinalResponseDto;
+import com.epay.payment.dto.TransactionDto;
+import com.epay.payment.entity.Order;
+import com.epay.payment.exceptions.PaymentException;
+import com.epay.payment.externalservice.KmsServicesClient;
+import com.epay.payment.model.response.KMSEncryptionKeysResponse;
+import com.epay.payment.model.response.PaymentFinalResponse;
+import com.epay.payment.model.response.PaymentResponse;
+import com.epay.payment.util.ErrorConstants;
+import com.epay.payment.util.PaymentConstants;
+import com.sbi.epay.logging.utility.LoggerFactoryUtility;
+import com.sbi.epay.logging.utility.LoggerUtility;
+import lombok.RequiredArgsConstructor;
+import org.apache.commons.collections4.CollectionUtils;
+import org.springframework.stereotype.Component;
+
+import java.text.MessageFormat;
+import java.util.List;
+
+import static com.epay.payment.util.EncryptionDecryptionUtil.decryptValue;
+import static com.epay.payment.util.EncryptionDecryptionUtil.encryptValue;
+import static com.epay.payment.util.PaymentConstants.STANDARD_COMMON_MID;
+import static com.epay.payment.util.PaymentUtil.toJson;
+
+/**
+ * Class Name: PaymentCallbackForwardDao
+ * *
+ * PaymentCallbackForwardDao is responsible for validating API KeyId And Scrt with the Kms Service
+ *  and retrieves the encryption key for a given merchant ID
+ * Author: VCE2656 - Vinod Bhosale
+ * Copyright (c) 2024 [State Bank of India]
+ * All rights reserved
+ * *
+ * Version:1.0
+ */
+@Component
+@RequiredArgsConstructor
+public class PaymentCallbackForwardDao {
+    private final PaymentDao paymentDao;
+    private final KmsServicesClient kmsServicesClient;
+    private final CardConfigDeatils cardConfigDeatils;
+    private final StandardConfig standardConfig;
+
+    LoggerUtility logger = LoggerFactoryUtility.getLogger(this.getClass());
+
+    /**
+     * @param mid:String
+     * @return String
+     */
+    public String getMerchantMekKey(String mid) {
+        if (standardConfig.getMIdList().contains(mid)) {
+            mid = STANDARD_COMMON_MID;
+        }
+        KMSEncryptionKeysResponse encryptionKeysResponse = getMekByMid(mid);
+        String kek = decryptValue(encryptionKeysResponse.getAek(), encryptionKeysResponse.getKek());
+        return decryptValue(kek, encryptionKeysResponse.getMek());
+    }
+
+    /**
+     * @param mId:String
+     * @return String
+     */
+    private KMSEncryptionKeysResponse getMekByMid(String mId) {
+        PaymentResponse<KMSEncryptionKeysResponse> kmsResponse = kmsServicesClient.getEncryptionKeys(mId);
+        if (PaymentConstants.RESPONSE_SUCCESS == kmsResponse.getStatus() && CollectionUtils.isNotEmpty(kmsResponse.getData())) {
+            KMSEncryptionKeysResponse encryptionKeyResponse = kmsResponse.getData().getFirst();
+            encryptionKeyResponse.setAek(cardConfigDeatils.getAek());
+            return encryptionKeyResponse;
+        } else if (CollectionUtils.isNotEmpty(kmsResponse.getErrors())) {
+            throw new PaymentException(kmsResponse.getErrors().toString(),"Merchant Encryption Keys");
+        }
+        throw new PaymentException(ErrorConstants.NOT_FOUND_ERROR_CODE, MessageFormat.format(ErrorConstants.NOT_FOUND_ERROR_MESSAGE, "Merchant Encryption Keys"));
+    }
+
+
+    public String buildEncryptedResponse(PaymentFinalResponse paymentFinalResponse, String encryptedResponse, String url, TransactionDto transactionDto, Order order, String mek) {
+        CallBackPaymentFinalResponseDto callBackPaymentFinalResponseDto = buildEncryptedFinalResponse(paymentFinalResponse, encryptedResponse, url,transactionDto,order);
+        PaymentResponse<CallBackPaymentFinalResponseDto> transactionResponse=PaymentResponse.<CallBackPaymentFinalResponseDto>builder().data(List.of(callBackPaymentFinalResponseDto)).status(1).build();
+        logger.info("transactionResponse. {}",transactionResponse);
+        String encryptionKey = paymentDao.findAesKeyBySbiOrderRefNumber(paymentFinalResponse.getSbiOrderId(),order.getMId(),mek);
+        return encryptValue(encryptionKey, toJson(transactionResponse));
+    }
+
+    private CallBackPaymentFinalResponseDto buildEncryptedFinalResponse(PaymentFinalResponse paymentFinalResponse, String encryptedResponse, String url,TransactionDto transactionDto, Order order) {
+        return CallBackPaymentFinalResponseDto.builder()
+                .encryptedPaymentFinalResponse(encryptedResponse)
+                .orderRetryCount(paymentFinalResponse.getOrderRetryCount())
+                .atrnNumber(paymentFinalResponse.getAtrn())
+                .transactionStatus(paymentFinalResponse.getTransactionStatus())
+                .reason(paymentFinalResponse.getReason())
+                .sbiOrderRefNumber(paymentFinalResponse.getSbiOrderId())
+                .orderRefNumber(paymentFinalResponse.getMerchantOrderNumber())
+                .totalAmount(paymentFinalResponse.getTotalAmount())
+                .returnUrl(order.getReturnUrl())
+                .currencyCode(transactionDto.getCurrencyCode())
+                .mId(transactionDto.getMerchantId())
+                .build();
+    }
+
+}
