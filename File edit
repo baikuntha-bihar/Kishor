@@ -65,3 +65,68 @@ data:
     epay.encryption.default-key=default-secret-key-32-characters-long
     epay.encryption.algorithm=AES
 
+    # Merchant Configuration
+    merchant.config.cache-enabled=true
+    merchant.config.cache-ttl-minutes=60
+
+    # Audit Configuration
+    audit.enabled=true
+    audit.mask-sensitive-data=true
+    audit.log-request-payload=true
+    audit.log-response-payload=true
+
+    # SBIEpay API Configuration
+    #sbiepay.api.base-url=https://uat.epay.sbi
+    sbiepay.api.base-url=http://txn-transactionservice.dev-transaction.svc.cluster.local:9092
+    sbiepay.api.payment-endpoint=/api/transaction/v1/order/create
+    sbiepay.api.status-endpoint=/api/transaction/v1/order/status
+    sbiepay.api.refund-endpoint=/v2/payment/refund
+    sbiepay.api.api-key=${SBIEPAY_API_KEY:default-api-key}
+    sbiepay.api.api-secret=${SBIEPAY_API_SECRET:default-api-secret}
+    sbiepay.api.connect-timeout=10000
+    sbiepay.api.read-timeout=30000
+    sbiepay.api.epayEncryptUrl=/api/javasimulator/v1/crypto/encrypt
+    sbiepay.api.epayDecryptUrl=/api/javasimulator/v1/crypto/decrypt
+
+    # SBIEpay OAuth2 Hosted Access Token Service Configuration
+    #sbiepay.api.token-endpoint=https://uat.epay.sbi/api/transaction/v1/token/access
+    sbiepay.api.token-endpoint=http://txn-transactionservice.dev-transaction.svc.cluster.local:9092/api/transaction/v1/token/access
+    sbiepay.api.auth-client-id=${SBIEPAY_AUTH_CLIENT_ID:demo-client-id}
+    sbiepay.api.auth-client-secret=${SBIEPAY_AUTH_CLIENT_SECRET:demo-client-secret}
+
+    # Resilience4j Configuration
+    resilience4j.circuitbreaker.instances.sbiepayApi.registerHealthIndicator=true
+    resilience4j.circuitbreaker.instances.sbiepayApi.failureRateThreshold=50
+    resilience4j.circuitbreaker.instances.sbiepayApi.waitDurationInOpenState=30s
+    resilience4j.circuitbreaker.instances.sbiepayApi.slidingWindowSize=10
+    resilience4j.circuitbreaker.instances.sbiepayApi.minimumNumberOfCalls=5
+
+    resilience4j.retry.instances.sbiepayApi.maxAttempts=3
+    resilience4j.retry.instances.sbiepayApi.waitDuration=2s
+
+    # Actuator Configuration (for monitoring circuit breakers)
+    management.endpoints.web.exposure.include=health,info,metrics,prometheus,circuitbreakers
+    management.health.circuitbreakers.enabled=true
+    management.endpoint.health.show-details=always
+    management.metrics.export.prometheus.enabled=true
+
+    # Swagger/OpenAPI Configuration (Temporarily disabled due to Spring Boot 2.7 compatibility)
+    # Access at https://merchant.sbiuat.bank.in/swagger-ui/ once enabled
+    springfox.documentation.enabled=false
+    springfox.documentation.swagger-ui.enabled=false
+
+    # Security Configuration (Development Only - Disable Auto-Configuration)
+    spring.autoconfigure.exclude=org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration,org.springframework.boot.actuate.autoconfigure.security.servlet.ManagementWebSecurityAutoConfiguration
+    # Adapter Callback Configuration (Pay-Redirect Flow)
+    #adapter.callback.base-url=https://merchant.sbiuat.bank.in/api/legacy/payment
+    adapter.callback.base-url=http://txn-transactionservice.dev-transaction.svc.cluster.local:9092/api/legacy/payment
+    adapter.callback.endpoint=/payment-redirect-callback
+    adapter.callback.session-timeout-minutes=30
+    adapter.callback.max-callback-attempts=3
+    adapter.callback.enable-ssl-validation=true
+
+    # Payment Session Configuration
+    payment.session.timeout-minutes=30
+    payment.session.max-attempts=3
+    payment.session.cleanup-schedule-minutes=60
+    redirectBaseURL=https://dev.epay.sbi/epay-bridge
