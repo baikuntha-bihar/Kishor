@@ -1,13 +1,14 @@
 ================================================
-Epay_Bridge_Service
+Epay_Sftp_Service
 ==============================================
+
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ .Release.Name }}-{{ .Values.configMap.nameSuffix }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{ include "Epay_Bridge_Service.labels" . | nindent 4 }}
+    {{ include "Epay_Sftp_Service.labels" . | nindent 4 }}
 {{ if $.Values.configMap.additionalLabels }}
     {{ toYaml $.Values.configMap.additionalLabels | nindent 4 }}
 {{ end }}
@@ -16,37 +17,26 @@ metadata:
     {{ toYaml $.Values.configMap.annotations | nindent 4 }}
 {{ end }}
 data:
-  application.properties: |
-    #server.port=8080
-    #server.servlet.context-path=/epayadapter
-        
-    #security.jwt.secret.issuer=https://sbi.epay.com
-    #security.jwt.secret.issuer=sbi.epay
-    #security.cors.origin=*
-    security.cors.allowed.origins=*
-    ##cors.origin=*
-    ##cors.allowed.origins=*
+  application.yml: |
+    spring.application.name=epay_sftp_service
+    server.port=9099
+    #server.servlet.context-path=/v1/payments/initiation/
+    server.servlet.context-path=/sftp/v1/
+    spring.messages.basename=errors,messages
 
-    server.port=8096
-    server.servlet.context-path=/epay-bridge
-    spring.application.name=epay-bridge
     # Db connectivity
     spring.jpa.show-sql=true
     spring.jpa.properties.hibernate.show_sql=true
-    spring.jpa.properties.hibernate.type.preferred_instant_jdbc_type=TIMESTAMP
-    spring.jpa.database-platform=org.hibernate.dialect.OracleDialect
-    spring.jpa.hibernate.ddl-auto=update
-    spring.jpa.defer-datasource-initialization=true
-    spring.datasource.url=jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=epaydbscandev.sbiepay.sbi)(PORT=1524))(CONNECT_DATA= (SERVER=DEDICATED) (SERVICE_NAME=epaydbdev.sbiepay.sbi)))
+    spring.jpa.properties.hibernate.format_sql=true
+    spring.web.resources.static-locations=classpath:/,file:/non-existent-folder
+    #logging.level.org.springframework.web=debug
+
     #spring.datasource.url=jdbc:oracle:thin:@10.177.134.124:1590:epaydbdev1
-    #spring.datasource.url=jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=10.177.134.124)(PORT=1590))(CONNECT_DATA= (SERVER=DEDICATED) (SERVICE_NAME=epaydbdev1)))
-
-
-    spring.datasource.username=EPAYBRIDGE
-    spring.datasource.password=Asdf_123
-    #spring.datasource.username=${DB_USERNAME}
-    #spring.datasource.password=${DB_PASSWORD}
-  
+    spring.datasource.url=jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=epaydbscandev.sbiepay.sbi)(PORT=1524))(CONNECT_DATA= (SERVER=DEDICATED) (SERVICE_NAME=epaydbdev.sbiepay.sbi)))
+    #spring.datasource.username=PAYAGGTRANSCTION
+    #spring.datasource.password=Ora_123
+    spring.datasource.username=PAYAGGTRANSCTION
+    spring.datasource.password=SIA#2025
     spring.datasource.driver-class-name=oracle.jdbc.OracleDriver
 
     # Optional settings
@@ -54,79 +44,257 @@ data:
     spring.datasource.hikari.minimum-idle=5
     spring.datasource.hikari.idle-timeout=30000
     spring.datasource.hikari.max-lifetime=2000000
-    
-    #log config
-    logging.level.root=INFO
-    logging.level.com.sbi.epay=INFO
-    logging.pattern.console=%d{yyyy-MM-dd HH:mm:ss} [%X{correlationId}] [%thread] %-5level %logger{36} - %msg%n
-    logging.pattern.file=%d{yyyy-MM-dd HH:mm:ss} [%X{correlationId}] [%thread] %-5level %logger{36} - %msg%n
 
-    # Encryption Configuration
-    epay.encryption.default-key=default-secret-key-32-characters-long
-    epay.encryption.algorithm=AES
+    #In Minutes
+    merchantOrderPayments.token.expiry.time=30
 
-    # Merchant Configuration
-    merchant.config.cache-enabled=true
-    merchant.config.cache-ttl-minutes=60
+    # Liquibase Properties
+    spring.liquibase.change-log=classpath:db/changelog/db.changelog-master.xml
+    spring.liquibase.enabled=false
+    spring.liquibase.drop-first=false
+    logging.level.liquibase=DEBUG
 
-    # Audit Configuration
-    audit.enabled=true
-    audit.mask-sensitive-data=true
-    audit.log-request-payload=true
-    audit.log-response-payload=true
+    #spring.jpa.hibernate.ddl-auto=none
+    #spring.jpa.database-platform=org.hibernate.dialect.OracleDialect
+    #spring.jpa.properties.hibernate.jdbc.batch_size=20
+    #spring.jpa.properties.hibernate.dialect =org.hibernate.dialect.OracleDialect
+    spring.jpa.hibernate.ddl-auto=none
+    spring.jpa.database-platform=org.hibernate.dialect.OracleDialect
 
-    # SBIEpay API Configuration
-    #sbiepay.api.base-url=https://uat.epay.sbi
-    sbiepay.api.base-url=http://txn-transactionservice.dev-transaction.svc.cluster.local:9092
-    sbiepay.api.payment-endpoint=/api/transaction/v1/order/create
-    sbiepay.api.status-endpoint=/api/transaction/v1/order/status
-    sbiepay.api.refund-endpoint=/v2/payment/refund
-    sbiepay.api.api-key=${SBIEPAY_API_KEY:default-api-key}
-    sbiepay.api.api-secret=${SBIEPAY_API_SECRET:default-api-secret}
-    sbiepay.api.connect-timeout=10000
-    sbiepay.api.read-timeout=30000
-    sbiepay.api.epayEncryptUrl=/api/javasimulator/v1/crypto/encrypt
-    sbiepay.api.epayDecryptUrl=/api/javasimulator/v1/crypto/decrypt
 
-    # SBIEpay OAuth2 Hosted Access Token Service Configuration
-    #sbiepay.api.token-endpoint=https://uat.epay.sbi/api/transaction/v1/token/access
-    sbiepay.api.token-endpoint=http://txn-transactionservice.dev-transaction.svc.cluster.local:9092/api/transaction/v1/token/access
-    sbiepay.api.auth-client-id=${SBIEPAY_AUTH_CLIENT_ID:demo-client-id}
-    sbiepay.api.auth-client-secret=${SBIEPAY_AUTH_CLIENT_SECRET:demo-client-secret}
+    #merchant.service.url=http://localhost:8080/api/merchant/data/{apiKey}/{secretKey}
 
-    # Resilience4j Configuration
-    resilience4j.circuitbreaker.instances.sbiepayApi.registerHealthIndicator=true
-    resilience4j.circuitbreaker.instances.sbiepayApi.failureRateThreshold=50
-    resilience4j.circuitbreaker.instances.sbiepayApi.waitDurationInOpenState=30s
-    resilience4j.circuitbreaker.instances.sbiepayApi.slidingWindowSize=10
-    resilience4j.circuitbreaker.instances.sbiepayApi.minimumNumberOfCalls=5
+    #external.api.merchant.services.base.path=http://localhost:8080/api/merchant
 
-    resilience4j.retry.instances.sbiepayApi.maxAttempts=3
-    resilience4j.retry.instances.sbiepayApi.waitDuration=2s
+    #jwt.secret.key=K98JUXrheTIDbUJcK312nith7i74bFJSjMF2v0tcuv4VKKu9DCCZrXBXVR5OAsXojKOsmWEAtVl4r7xa935i3g==
+    #security.whitelist.url=/webjars/, /actuator/, /swagger-resources/, /v3/api-docs, /swagger-ui/, /swagger-ui.html, /v1/token/access
 
-    # Actuator Configuration (for monitoring circuit breakers)
-    management.endpoints.web.exposure.include=health,info,metrics,prometheus,circuitbreakers
-    management.health.circuitbreakers.enabled=true
-    management.endpoint.health.show-details=always
-    management.metrics.export.prometheus.enabled=true
+    #Application Proxy Details
+    https_protocols = TLSv1.2
+    https_proxySet = true
+    https_proxyHost = serverswg.sbi.co.in
+    https_proxyPort = 9090
 
-    # Swagger/OpenAPI Configuration (Temporarily disabled due to Spring Boot 2.7 compatibility)
-    # Access at https://merchant.sbiuat.bank.in/swagger-ui/ once enabled
-    springfox.documentation.enabled=false
-    springfox.documentation.swagger-ui.enabled=false
+    #################### sbiinb constants start #####################
+    #epay.payment.sbiinb.aek=BiIZ5feKr16Td3XSpVywqXlwRNfSy9Gtis04WqEbD/0=
+    #epay.payment.sbiinb.mek=xSUnsXbNEZPochZmrombg5NqEDQAswxoxw+WmDSb2lyocZrsShk7DUL0N89f0RoIwkZVCZI/hWHs95Sw
+    #epay.payment.sbiinb.kek=lZiUYRr3E3tZBZJECefddgTBo6j1oRAXaBjOHF1KLSmXKhBhPsXlpnKNI7XGzsHgTiI0u6o9k4Q1YmZW
+    epay.payment.sbiinb.sbiinbKey=resources/keys/SBI_EPAY.key
+    epay.payment.sbiinb.meCode=SBIEPAY
+    epay.payment.sbiinb.dvURL=SBIEPAY
+    epay.payment.sbiinb.bankURL=https://uatmerchant.onlinesbi.sbi
 
-    # Security Configuration (Development Only - Disable Auto-Configuration)
-    spring.autoconfigure.exclude=org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration,org.springframework.boot.actuate.autoconfigure.security.servlet.ManagementWebSecurityAutoConfiguration
-    # Adapter Callback Configuration (Pay-Redirect Flow)
-    #adapter.callback.base-url=https://merchant.sbiuat.bank.in/api/legacy/payment
-    adapter.callback.base-url=http://txn-transactionservice.dev-transaction.svc.cluster.local:9092/api/legacy/payment
-    adapter.callback.endpoint=/payment-redirect-callback
-    adapter.callback.session-timeout-minutes=30
-    adapter.callback.max-callback-attempts=3
-    adapter.callback.enable-ssl-validation=true
+    #epay.payment.sbiinb.bankbrowserurl=https://uatmerchant.onlinesbi.sbi/merchant/merchantprelogin.htm
+    epay.payment.sbiinb.bankbrowserurl=https://merchantuat.onlinesbi.sbi/merchant/merchantprelogin.htm
+    epay.payment.sbiinb.bankdvurl=https://merchantuat.onlinesbi.sbi/thirdparties/doubleverification.htm
+    epay.payment.sbiinb.keyvalue=encdata
+    epay.payment.sbiinb.merchantcode=SBIEPAY2
+    epay.payment.sbiinb.paymentsRedirectUrl=/payments/v1/sbi/inb/responseRedirect?status=
+    epay.payment.sbiinb.devredirecturl=https://dev.epay.sbi/2.0/channel/inb/sbi/
 
-    # Payment Session Configuration
-    payment.session.timeout-minutes=30
-    payment.session.max-attempts=3
-    payment.session.cleanup-schedule-minutes=60
-    redirectBaseURL=https://dev.epay.sbi/epay-bridge
+    #SBI INB Redirection URL
+    epay.payment.sbiinb.cancelurl=https://dev.epay.sbi/payments/v1/sbi/inb/callback
+    epay.payment.sbiinb.sbiredirecturl=https://dev.epay.sbi/payments/v1/sbi/inb/callback
+
+    ####### Other INB #######
+    epay.payment.otherinb.success.base.path=https://www.sbiepay.sbi
+    epay.payment.otherinb.fail.base.path=https://www.sbiepay.sbi
+    epay.payment.other_inb_mid=1000524
+    epay.payment.other_inb_key=A3FZ8NvgJN4IjD2OYtYQQfEN83Ej13rOVNYm38Prtpo=
+    epay.payment.merchant_post_url=https://uat.sbiepay.sbi/secure/MerchantHostedListener
+    #merchant_post_url=https://uat.sbiepay.sbi/secure/AggregatorHostedListener
+    #sbiinb.otherInbStatusQuery=https://uat.sbiepay.sbi/payagg/orderStatusQuery/getOrderStatusQuery
+    epay.payment.sbiinb.otherinbstatusquery=https://uat.sbiepay.sbi/payagg/statusQuery/getStatusQuery
+
+    #################### sbiinb constants end #####################
+
+    upi.upiGatewayConfigDetailsUrl= /merchant/gateway
+
+    #START OF UPI DETAILS---#SBIEpay2.0
+
+    UPI.UPI_CLIENT_ID = SBIEPAY_MID_2.0
+    UPI.SECRETKEY=f65e8f0a484d45babd33c10b4535ef66
+    UPI.OAUTH_USERNAME =oauth2-api-merweb-SBI0000000032588
+    UPI.OAUTH_PASSWORD = 05B6948CCFCA37A74B3DDDD15F9482040A998019ED67D2C77B4F5554DCB48B13
+
+    #<!--Merchant me code--> USED IN PG MERCHANTID
+    PG.UPI_MERCHANT_ID=SBI0000000032588
+
+    #<!--PGP Encryption> -Password use(Epay side)----Created for Encryption-Decryption in Utility jar
+    UPI_PVT_KEY_PWD = Uat@Sbiepay
+
+
+    #UPI public key-------------
+    UPI.UPI_SBI_PUBLIC_KEY_PATH=keys/SBI0000000032588_UAT_1224_PublicKey.asc
+
+    #Epay private -------------------
+    UPI.EPAY_PVT_KEY_PATH= keys/0x1D883787-sec.asc
+
+    UPI.PACKET_ENCRYPTION_KEY= 25dea54b392d9b24803d95e2df4d11d8
+
+    UPI.OAUTH_TOKEN_URL= https://uatupionline.sbi/upi2/oauth/token
+    #UPI.VALIDATE_VPA_CHECK_URL= https://uatupionline.sbi/upi2/upi/web/v2.0/validatevpaweb
+    UPI.VALIDATE_VPA_CHECK_URL= https://uatupionline.sbi/upi2/upi/web/v2.0/validateVPAWeb
+    UPI.VPA_COLLECT_URL= https://uatupionline.sbi/upi2/upi/web/v2.0/meCollectInitiateWeb
+    UPI.TXN_STATUS_ENQUIRY_URL=https://uatupionline.sbi/upi2/upi/web/v2.0/meTranStatusQueryWeb
+    UPI.UPI_CALLBACK_URL=https://uat.sbiepay.sbi/secure/upiProcessingServlet
+
+    UPI.UPICONFIG.URL=http://localhost:9098/admin/v1/merchant/upi/getUpiConfigDeatils
+
+    #For QR Sign -----------------
+    UPI_category=01
+    UPI_intentMode=05
+    UPI_ivtoken=2F70CBBDFAE8DBA95F46CEB68A970673
+    UPI_keyid=10
+    UPI_mode=05
+    UPI_purpose=00
+    UPI_qrMedium=06
+    UPI_ver=01
+    UPI_cu=INR
+    UPI_tier=TIER1
+    #---TEMPORARY FIELD ---
+    UPI_upiQrVpa=testmerchant@sbi
+    UPI_businessName =TestMerchant
+    UPI_mccCode =9399
+    UPI.TXN_STATUS_ENQUIRY_API_URL=
+    UPI.VPA_CHECK_API_URL=
+
+
+
+
+    upiqr.private.key.path=keys/0x1D883787-sec.asc
+    upiqr.private.key.password= Uat@Sbiepay
+    upiqr.sbi.public.key.path=keys/SBI0000000032588_UAT_1224_PublicKey.asc
+
+    #URLs
+    UPI.INTENT_API_URL=https://uatupionline.sbi/upi2/upi/mandate/signVerifyIntent
+    UPI.UPI_CONFIG_DEATILS_URL=http://localhost:9097/admin/v1/merchant/upi/getUpiConfigDeatils
+    UPI.HANDSHAKE_API_URL=https://uatupionline.sbi/upi2/upi/oauth2-web-handshake
+
+
+    #END OF UPI DETAILS
+
+    #WIBMO PG Constants
+    epay.payment.card.REFUNDURL = https://areionsbi.wibmo.com/voidrefundservice/api/v1/voidorrefund
+    epay.payment.card.REFUNDENQUIRY = https://areionsbi.wibmo.com/merchantOrderPayments/api/v2/txn-status
+
+    epay.payment.card.callback_url_intl = https://dev.epay.sbi/payments/v3/intl/visamaster/callback
+    epay.payment.card.callbackg_url_rupay_intl = https://dev.epay.sbi/payments/v3/intl/rupay/callback
+    epay.payment.card.callbackg_url_rupay = https://dev.epay.sbi/payments/v3/rupay/callback
+    epay.payment.card.callback_url = https://dev.epay.sbi/payments/v3/visamaster/callback
+    epay.payment.card.pvReqURL = https://secure-3dssapi-az.wibmo.com/3dsserverapi/v5/pVrq/8642/
+    epay.payment.card.saleAuthURL = https://areionsbi.wibmo.com/saleservice/api/v1/sale
+    epay.payment.card.checkbin_Url = https://areionsbi.wibmo.com/authentication/api/v1/checkbin
+    epay.payment.card.initiate_url = https://areionsbi.wibmo.com/authentication/api/v1/initiate
+    epay.payment.card.generateOtp_url = https://areionsbi.wibmo.com/authentication/api/v1/generateOtp
+    epay.payment.card.resendOtp_url = https://areionsbi.wibmo.com/authentication/api/v1/resendOtp
+    epay.payment.card.verifyOtp_url = https://areionsbi.wibmo.com/authentication/api/v1/verifyOtp
+    epay.payment.card.authorize_url = https://areionsbi.wibmo.com/saleservice/api/v1/authorize
+    epay.payment.card.reverse_url = https://areionsbi.wibmo.com/authentication/web/v1/parseRupayResponse
+    epay.payment.card.token_url = https://tokenvault-sbi.wibmo.com/tokenVault/v3/tokenize
+    epay.payment.card.api_key = 7e377272-d4b8-11ee-a8c7-005056b5bdb3
+    epay.payment.card.clientId = 7823a827-6cd3-4fc9-8f8f-c76db9ef407c
+    epay.payment.card.clientApiUser = 100001-SBIe-2sL5qU9wR3
+    epay.payment.card.clientApiKey = SBIe8cG8fI0hB7
+    epay.payment.card.tokenSecretKey = c19215e2-c2a4-4630-937b-a3bfd764c96b
+    epay.payment.card.merchantId_Token = SBIEPAYMUINALTID001
+    epay.payment.card.SALT = 8d3e5e6436d3b0ef2bd61424c82ab7e3
+    epay.payment.card.tokenRequesterId_MC = 035f91e4-8b3a-4127-a037-574fb82387c0
+    epay.payment.card.tokenRequesterId_VS = DFFFAC4C-B2D8-4CEA-BEBB-E7EB1716A348
+    epay.payment.card.tokenRequesterId_R = 77700011145
+    epay.payment.card.pgInstanceId = 72702415
+    epay.payment.card.pgInstanceId_2 = 72702415
+    epay.payment.card.acquirerBIN_MASTER = 597291
+    epay.payment.card.acquirerBIN_VISA = 401934
+    epay.payment.card.acquiringBankId = 35761063
+    epay.payment.card.acquirerID = 8642
+    epay.payment.card.acquireInstanceId = 30b8b010-5987-4dc2-96cd-7a1d20a520d6
+    epay.payment.card.acquirerMerchantId = 243754249380023
+    epay.payment.card.MCC = 4900
+    epay.payment.card.merchantId = 35967615
+    epay.payment.card.transactionTypeCode = 9003
+    epay.payment.card.deviceCategory = 0
+    epay.payment.card.deviceChannel = 02
+    epay.payment.card.p_messageVersion = 2.1.0
+    epay.payment.card.messageCategory = 01
+    epay.payment.card.vaultId = 100001
+    epay.payment.card.INR = 356
+    epay.payment.card.USD = 840
+    epay.payment.card.trantype = 1
+    epay.payment.card.pgInstanceId_1 = 8642
+    #SBIEPAY Client jks properties
+    wibmo.client_jks_filename=keys/sbiepay_newpg.jks
+    wibmo.client_jks_file_pwd=Sbi@1234
+    wibmo.client_alias_name=1
+    wibmo.client_alias_pwd=Sbi@1234
+    #WIBMO PG Public cert AliasName
+    wibmo.server_pk_alias_name=client_keystore
+    epay.payment.card.paymentsRedirectUrl=/payments/v1/sbi/inb/responseRedirect?status=
+    epay.payment.card.cardOnboardURL=https://dev.epay.sbi/admin/v1/merchant/cards/cardonboarddtls
+    ##### End Wibmo
+
+
+    cors.allowedOrigins=*
+    security.whitelist.url=/webjars/, /actuator/, /swagger-resources/, /v3/api-docs, /swagger-ui/, /swagger-ui.html, /token,/downtime/api,/s1/fetch-data,/payments/v1/sbi,/sbi/inb
+    whitelisted.endpoints=/webjars/, /actuator/, /swagger-resources/, /v3/api-docs, /swagger-ui/, /swagger-ui.html, /token,/downtime/api,/s1/fetch-data,/payments/v1/sbi,/sbi/inb
+    jwt.secret.key=gdjfgskjfhsdjkhkflkdlksdlfkskfwperip3ke3le3lmldrnkfnhiewjfejfokepfkldkfoikfokork3dklwedlsvflvkfkvlkdfvodkvcdokro3
+
+
+    #External Base Path
+    external.api.admin.services.base.path=http://admin-adminservice.dev-admin.svc.cluster.local:9094/api/admin/v1
+
+    upi.server.private.key.path=0x1D883787-sec.asc
+    upi.server.public.key.path=SBI0000000032588_UAT_1224_PublicKey.asc
+    security.cors.origin=https://dev.epay.sbi
+    cors.origin=https://dev.epay.sbi
+    epay.payment.other_inb_key_browser=''
+    external.api.transaction.services.base.path=http://txn-transactionservice.dev-transaction.svc.cluster.local:9092/api/txn/v1
+    epay.payment.card.finalResponse_Url=/callback
+    external.api.ui.service.redirectView=https://dev.epay.sbi/ui/channel/sbi?
+    external.api.paymentCallBackUrl=https://dev.epay.sbi/demo/
+    key.aek=BiIZ5feKr16Td3XSpVywqXlwRNfSy9Gtis04WqEbD/0=
+    kms.service.base-url=http://kms-kmsservice.dev-kms.svc.cluster.local:9093/api/kms/v1
+    kms.service.cors-origin=https://dev.epay.sbi
+    gateway.booked.refund.card.cron_time=0 0/01 * * * *
+    gateway.amount.exceeded.refund.card.cron_time=0 0/45 * * * *
+    gateway.chargeback.processed.refund.card.cron_time=0 0/50 * * * *
+
+
+    #need to check
+    spring.kafka.topic.gateway.refund.card=merchant_report_topic
+    spring.kafka.topic.gateway.refund.inb=merchant_report_topic
+    spring.kafka.topic.gateway.refund.otherINB=merchant_report_topic
+    spring.kafka.bootstrapServers=dev-kafka-cluster-kafka-bootstrap.dev-kafka.svc.cluster.local:9092
+    #spring.kafka.bootstrapServers=localhost:9092
+    spring.kafka.consumer.groupId=transaction-consumers
+    spring.kafka.consumer.enableAutoCommit=true
+    spring.kafka.consumer.autoCommitInterval=100
+    spring.kafka.consumer.sessionTimeoutMS=300000
+    spring.kafka.consumer.requestTimeoutMS=420000
+    spring.kafka.consumer.fetchMaxWaitMS=200
+    spring.kafka.consumer.maxPollRecords=5
+    spring.kafka.consumer.autoOffsetReset=latest
+    spring.kafka.consumer.keyDeserializer=org.apache.kafka.common.serialization.StringDeserializer
+    spring.kafka.consumer.valueDeserializer=org.apache.kafka.common.serialization.StringDeserializer
+    spring.kafka.consumer.retryMaxAttempts=3
+    spring.kafka.consumer.retryBackOffInitialIntervalMS=1
+    spring.kafka.consumer.retryBackOffMaxIntervalMS=1
+    spring.kafka.consumer.numberOfConsumers=100
+    spring.kafka.producer.acks=all
+    spring.kafka.producer.retries=3
+    spring.kafka.producer.batchSize=1000
+    spring.kafka.producer.lingerMs=1
+    spring.kafka.producer.bufferMemory=33554432
+    gateway.refund.kafka.sslConfig.provided=false
+    spring.kafka.properties.security.protocol=SSL
+    spring.kafka.properties.ssl.truststore.location=dev-cluster-cluster-ca-cert.p12
+    spring.kafka.properties.ssl.truststore.password=Xe8FrxOGvVAx
+    spring.kafka.properties.ssl.truststore.type=PKCS12
+    spring.kafka.properties.ssl.keystore.location=dev-cluster-clients-ca-cert.p12
+    spring.kafka.properties.ssl.keystore.password=J55FITkgEFid
+    spring.kafka.properties.ssl.keystore.type=PKCS12
+    spring.kafka.topic.partitions=4
+    spring.kafka.topic.replicationFactor=1
+    spring.kafka.producer.keySerializer=org.apache.kafka.common.serialization.StringSerializer
+    spring.kafka.producer.valueSerializer=org.apache.kafka.common.serialization.StringSerializer
+
