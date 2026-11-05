@@ -1,8 +1,15 @@
+# =============================================
+# Epay_Stubs_Service
+# =============================================
+
 spring:
   application:
-    name: epay_sftp_service
+    name: epay_stubs_service
+
   messages:
     basename: "errors,messages"
+
+  # Db connectivity
   jpa:
     show-sql: true
     properties:
@@ -11,109 +18,69 @@ spring:
         format_sql: true
     hibernate:
       ddl-auto: none
-    database-platform: org.hibernate.dialect.OracleDialect
+
   web:
     resources:
       static-locations: "classpath:/,file:/non-existent-folder"
+
   datasource:
     # url: "jdbc:oracle:thin:@10.177.134.124:1590:epaydbdev1"
     url: "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=epaydbscandev.sbiepay.sbi)(PORT=1524))(CONNECT_DATA= (SERVER=DEDICATED) (SERVICE_NAME=epaydbdev.sbiepay.sbi)))"
+
     # username: PAYAGGTRANSCTION
     # password: Ora_123
-    username: PAYAGGTRANSCTION
-    password: "SIA#2025"
+    # username: PAYAGGTRANSCTION
+    # password: AIS#2025
+
+    username: EPAYTRANSCTION
+    password: "April_2025"
     driver-class-name: oracle.jdbc.OracleDriver
+
+    # Optional settings
     hikari:
       maximum-pool-size: 10
       minimum-idle: 5
       idle-timeout: 30000
       max-lifetime: 2000000
+
   liquibase:
     change-log: classpath:db/changelog/db.changelog-master.xml
     enabled: false
     drop-first: false
-  kafka:
-    topic:
-      gateway:
-        refund:
-          card: merchant_report_topic
-          inb: merchant_report_topic
-          otherINB: merchant_report_topic
-      partitions: 4
-      replicationFactor: 1
-    # bootstrapServers: localhost:9092
-    bootstrapServers: dev-kafka-cluster-kafka-bootstrap.dev-kafka.svc.cluster.local:9092
-    consumer:
-      groupId: transaction-consumers
-      enableAutoCommit: true
-      autoCommitInterval: 100
-      sessionTimeoutMS: 300000
-      requestTimeoutMS: 420000
-      fetchMaxWaitMS: 200
-      maxPollRecords: 5
-      autoOffsetReset: latest
-      keyDeserializer: org.apache.kafka.common.serialization.StringDeserializer
-      valueDeserializer: org.apache.kafka.common.serialization.StringDeserializer
-      retryMaxAttempts: 3
-      retryBackOffInitialIntervalMS: 1
-      retryBackOffMaxIntervalMS: 1
-      numberOfConsumers: 100
-    producer:
-      acks: all
-      retries: 3
-      batchSize: 1000
-      lingerMs: 1
-      bufferMemory: 33554432
-      keySerializer: org.apache.kafka.common.serialization.StringSerializer
-      valueSerializer: org.apache.kafka.common.serialization.StringSerializer
-    properties:
-      security:
-        protocol: SSL
-      ssl:
-        truststore:
-          location: dev-cluster-cluster-ca-cert.p12
-          password: "Xe8FrxOGvVAx"
-          type: PKCS12
-        keystore:
-          location: dev-cluster-clients-ca-cert.p12
-          password: "J55FITkgEFid"
-          type: PKCS12
-  #logging.level.org.springframework.web=debug
+
+  # logging.level.org.springframework.web=debug
 
 server:
-  port: 9099
+  port: 9090
   servlet:
     # context-path: /v1/payments/initiation/
-    context-path: /sftp/v1/
-
-# Db connectivity
-#spring.jpa.hibernate.ddl-auto=none
-#spring.jpa.database-platform=org.hibernate.dialect.OracleDialect
-#spring.jpa.properties.hibernate.jdbc.batch_size=20
-#spring.jpa.properties.hibernate.dialect =org.hibernate.dialect.OracleDialect
+    context-path: /stubs/payments/v1/
 
 logging:
   level:
     liquibase: DEBUG
-    # org.springframework.web: debug
 
+# In Minutes
 merchantOrderPayments:
   token:
     expiry:
       time: 30
 
-# Liquibase Properties
+# merchant.service.url=http://localhost:8080/api/merchant/data/{apiKey}/{secretKey}
+# external.api.merchant.services.base.path=http://localhost:8080/api/merchant
+# jwt.secret.key=K98JUXrheTIDbUJcK312nith7i74bFJSjMF2v0tcuv4VKKu9DCCZrXBXVR5OAsXojKOsmWEAtVl4r7xa935i3g==
+# security.whitelist.url=/webjars/, /actuator/, /swagger-resources/, /v3/api-docs, /swagger-ui/, /swagger-ui.html, /v1/token/access
 
 # Application Proxy Details
 https_protocols: TLSv1.2
 https_proxySet: true
-https_proxyHost: serverswg.sbi.co.in
+https_proxyHost: 10.191.191.39
 https_proxyPort: 9090
 
-# #################### sbiinb constants start #####################
-#epay.payment.sbiinb.aek=BiIZ5feKr16Td3XSpVywqXlwRNfSy9Gtis04WqEbD/0=
-#epay.payment.sbiinb.mek=xSUnsXbNEZPochZmrombg5NqEDQAswxoxw+WmDSb2lyocZrsShk7DUL0N89f0RoIwkZVCZI/hWHs95Sw
-#epay.payment.sbiinb.kek=lZiUYRr3E3tZBZJECefddgTBo6j1oRAXaBjOHF1KLSmXKhBhPsXlpnKNI7XGzsHgTiI0u6o9k4Q1YmZW
+#################### sbiinb constants start #####################
+# epay.payment.sbiinb.aek=BiIZ5feKr16Td3XSpVywqXlwRNfSy9Gtis04WqEbD/0=
+# epay.payment.sbiinb.mek=xSUnsXbNEZPochZmrombg5NqEDQAswxoxw+WmDSb2lyocZrsShk7DUL0N89f0RoIwkZVCZI/hWHs95Sw
+# epay.payment.sbiinb.kek=lZiUYRr3E3tZBZJECefddgTBo6j1oRAXaBjOHF1KLSmXKhBhPsXlpnKNI7XGzsHgTiI0u6o9k4Q1YmZW
 
 epay:
   payment:
@@ -122,18 +89,24 @@ epay:
       meCode: SBIEPAY
       dvURL: SBIEPAY
       bankURL: https://uatmerchant.onlinesbi.sbi
-      # bankbrowserurl: https://uatmerchant.onlinesbi.sbi/merchant/merchantprelogin.htm
-      bankbrowserurl: https://merchantuat.onlinesbi.sbi/merchant/merchantprelogin.htm
-      bankdvurl: https://merchantuat.onlinesbi.sbi/thirdparties/doubleverification.htm
+
+      # bankbrowserurl=https://uatmerchant.onlinesbi.sbi/merchant/merchantprelogin.htm
+      # bankbrowserurl=https://merchantuat.onlinesbi.sbi/merchant/merchantprelogin.htm
+      bankbrowserurl: https://dev.epay.sbi/stubs/payments/v1/inb/inbPostURL
+
+      # bankdvurl=https://merchantuat.onlinesbi.sbi/thirdparties/doubleverification.htm
+      bankdvurl: https://dev.epay.sbi/stubs/thirdparties/doubleverification.htm
+
       keyvalue: encdata
       merchantcode: SBIEPAY2
       paymentsRedirectUrl: "/payments/v1/sbi/inb/responseRedirect?status="
       devredirecturl: https://dev.epay.sbi/2.0/channel/inb/sbi/
+
       # SBI INB Redirection URL
       cancelurl: https://dev.epay.sbi/payments/v1/sbi/inb/callback
       sbiredirecturl: https://dev.epay.sbi/payments/v1/sbi/inb/callback
-      otherinbstatusquery: https://uat.sbiepay.sbi/payagg/statusQuery/getStatusQuery
 
+    # Other INB
     otherinb:
       success:
         base:
@@ -146,20 +119,20 @@ epay:
     other_inb_key: "A3FZ8NvgJN4IjD2OYtYQQfEN83Ej13rOVNYm38Prtpo="
     merchant_post_url: https://uat.sbiepay.sbi/secure/MerchantHostedListener
 
-    # merchant_post_url: https://uat.sbiepay.sbi/secure/AggregatorHostedListener
-    # sbiinb.otherInbStatusQuery: https://uat.sbiepay.sbi/payagg/orderStatusQuery/getOrderStatusQuery
+    # merchant_post_url=https://uat.sbiepay.sbi/secure/AggregatorHostedListener
+    # sbiinb.otherInbStatusQuery=https://uat.sbiepay.sbi/payagg/orderStatusQuery/getOrderStatusQuery
+
+    sbiinb:
+      otherinbstatusquery: https://uat.sbiepay.sbi/payagg/statusQuery/getStatusQuery
 
     card:
-      REFUNDURL: https://areionsbi.wibmo.com/voidrefundservice/api/v1/voidorrefund
-      REFUNDENQUIRY: https://areionsbi.wibmo.com/merchantOrderPayments/api/v2/txn-status
-
-      callback_url_intl: https://dev.epay.sbi/payments/v3/intl/visamaster/callback
-      callbackg_url_rupay_intl: https://dev.epay.sbi/payments/v3/intl/rupay/callback
-      callbackg_url_rupay: https://dev.epay.sbi/payments/v3/rupay/callback
-      callback_url: https://dev.epay.sbi/payments/v3/visamaster/callback
-
+      callbackg_url_rupay: https://dev.epay.sbi/payments/v3/cardcallback/visamaster
+      callback_url: https://dev.epay.sbi/payments/v3/cardcallback/rupay
       pvReqURL: https://secure-3dssapi-az.wibmo.com/3dsserverapi/v5/pVrq/8642/
       saleAuthURL: https://areionsbi.wibmo.com/saleservice/api/v1/sale
+      doubleVerification: https://areionsbi.wibmo.com/merchantOrderPayments/api/v1/txn-status
+      REFUNDURL: https://areionsbi.wibmo.com/voidrefundservice/api/v1/voidorrefund
+      REFUNDENQUIRY: https://areionsbi.wibmo.com/merchantOrderPayments/api/v2/txn-status
       checkbin_Url: https://areionsbi.wibmo.com/authentication/api/v1/checkbin
       initiate_url: https://areionsbi.wibmo.com/authentication/api/v1/initiate
       generateOtp_url: https://areionsbi.wibmo.com/authentication/api/v1/generateOtp
@@ -174,12 +147,14 @@ epay:
       clientApiUser: 100001-SBIe-2sL5qU9wR3
       clientApiKey: SBIe8cG8fI0hB7
       tokenSecretKey: c19215e2-c2a4-4630-937b-a3bfd764c96b
+      tokenSecretKey_1: c19215e2-c2a4-4630-937b-a3bfd764c96b
       merchantId_Token: SBIEPAYMUINALTID001
       SALT: 8d3e5e6436d3b0ef2bd61424c82ab7e3
       tokenRequesterId_MC: 035f91e4-8b3a-4127-a037-574fb82387c0
       tokenRequesterId_VS: DFFFAC4C-B2D8-4CEA-BEBB-E7EB1716A348
       tokenRequesterId_R: 77700011145
 
+      pgInstanceId_1: 8642
       pgInstanceId: 72702415
       pgInstanceId_2: 72702415
       acquirerBIN_MASTER: 597291
@@ -199,31 +174,26 @@ epay:
       INR: 356
       USD: 840
       trantype: 1
-      pgInstanceId_1: 8642
-
-      paymentsRedirectUrl: "/payments/v1/sbi/inb/responseRedirect?status="
+      verficationtype: 8
+      refundtype: 2
+      proxySet: true
+      tokenSecretKey_Onboard: 6993cf96-7c56-47ab-9ceb-b7a8a5bfddb8
+      Acquirer_ICA: 32996
+      dpaIdApi_Url: https://tokenvault-sbi.wibmo.com/tokenVault/nts/v1/dpa/onboard
+      browserAgent: "TestMerchant/26.5.0.100 (Android/13/SM-S908E)"
+      seamlessURL: https://dev.epay.sbi/RupayCardOTPGeneration.jsp
       cardOnboardURL: https://dev.epay.sbi/admin/v1/merchant/cards/cardonboarddtls
-      finalResponse_Url: /callback
+      paymentsRedirectUrl: "/payments/v1/sbi/inb/responseRedirect?status="
+      finalResponse_Url: ""
 
-    other_inb_key_browser: "''"
+    other_inb_key_browser: qwerft
 
-# SBI INB Redirection URL
-# ####### Other INB #######
 # #################### sbiinb constants end #####################
 
 upi:
   upiGatewayConfigDetailsUrl: /merchant/gateway
-  server:
-    private:
-      key:
-        path: 0x1D883787-sec.asc
-    public:
-      key:
-        path: SBI0000000032588_UAT_1224_PublicKey.asc
 
 # START OF UPI DETAILS---#SBIEpay2.0
-# <!--Merchant me code--> USED IN PG MERCHANTID
-# <!--PGP Encryption> -Password use(Epay side)----Created for Encryption-Decryption in Utility jar
 
 UPI:
   UPI_CLIENT_ID: SBIEPAY_MID_2.0
@@ -240,8 +210,7 @@ UPI:
   PACKET_ENCRYPTION_KEY: 25dea54b392d9b24803d95e2df4d11d8
   OAUTH_TOKEN_URL: https://uatupionline.sbi/upi2/oauth/token
 
-  # VALIDATE_VPA_CHECK_URL: https://uatupionline.sbi/upi2/upi/web/v2.0/validatevpaweb
-  VALIDATE_VPA_CHECK_URL: https://uatupionline.sbi/upi2/upi/web/v2.0/validateVPAWeb
+  # VALIDATE_VPA_CHECK_URL=https://uatupionline.sbi/upi2/upi/web/v2.0/validatevpaweb
   VPA_COLLECT_URL: https://uatupionline.sbi/upi2/upi/web/v2.0/meCollectInitiateWeb
   TXN_STATUS_ENQUIRY_URL: https://uatupionline.sbi/upi2/upi/web/v2.0/meTranStatusQueryWeb
   UPI_CALLBACK_URL: https://uat.sbiepay.sbi/secure/upiProcessingServlet
@@ -249,13 +218,13 @@ UPI:
   UPICONFIG:
     URL: http://localhost:9098/admin/v1/merchant/upi/getUpiConfigDeatils
 
+  TXN_STATUS_ENQUIRY_API_URL: ""
+  VPA_CHECK_API_URL: ""
+
   # URLs
   INTENT_API_URL: https://uatupionline.sbi/upi2/upi/mandate/signVerifyIntent
   UPI_CONFIG_DEATILS_URL: http://localhost:9097/admin/v1/merchant/upi/getUpiConfigDeatils
   HANDSHAKE_API_URL: https://uatupionline.sbi/upi2/upi/oauth2-web-handshake
-
-  TXN_STATUS_ENQUIRY_API_URL: ""
-  VPA_CHECK_API_URL: ""
 
 PG:
   UPI_MERCHANT_ID: SBI0000000032588
@@ -293,12 +262,14 @@ upiqr:
 
 # WIBMO PG Constants
 # SBIEPAY Client jks properties
+# CLIENT_JKS_FILE_NAME=resources/keys/sbiepay_newpg.jks
+# CLIENT_JKS_FILE_NAME=/jboss/app-config/keys/newpg/sbiepay_newpg.jks
+
 wibmo:
   client_jks_filename: keys/sbiepay_newpg.jks
   client_jks_file_pwd: Sbi@1234
   client_alias_name: "1"
   client_alias_pwd: Sbi@1234
-
   # WIBMO PG Public cert AliasName
   server_pk_alias_name: client_keystore
 
@@ -306,13 +277,13 @@ wibmo:
 
 cors:
   allowedOrigins: "*"
-  origin: https://dev.epay.sbi
+  origin: http://localhost:9095
 
 security:
   whitelist:
     url: "/webjars/, /actuator/, /swagger-resources/, /v3/api-docs, /swagger-ui/, /swagger-ui.html, /token,/downtime/api,/s1/fetch-data,/payments/v1/sbi,/sbi/inb"
   cors:
-    origin: https://dev.epay.sbi
+    origin: http://localhost:9095
 
 whitelisted:
   endpoints: "/webjars/, /actuator/, /swagger-resources/, /v3/api-docs, /swagger-ui/, /swagger-ui.html, /token,/downtime/api,/s1/fetch-data,/payments/v1/sbi,/sbi/inb"
@@ -321,18 +292,13 @@ jwt:
   secret:
     key: gdjfgskjfhsdjkhkflkdlksdlfkskfwperip3ke3le3lmldrnkfnhiewjfejfokepfkldkfoikfokork3dklwedlsvflvkfkvlkdfvodkvcdokro3
 
-#merchant.service.url=http://localhost:8080/api/merchant/data/{apiKey}/{secretKey}
-#external.api.merchant.services.base.path=http://localhost:8080/api/merchant
-#jwt.secret.key=K98JUXrheTIDbUJcK312nith7i74bFJSjMF2v0tcuv4VKKu9DCCZrXBXVR5OAsXojKOsmWEAtVl4r7xa935i3g==
-#security.whitelist.url=/webjars/, /actuator/, /swagger-resources/, /v3/api-docs, /swagger-ui/, /swagger-ui.html, /v1/token/access
-
 # External Base Path
 external:
   api:
     admin:
       services:
         base:
-          path: http://admin-adminservice.dev-admin.svc.cluster.local:9094/api/admin/v1
+          path: http://admin-adminservice.dev-sbiepay.svc.cluster.local:9094/admin/v1
     transaction:
       services:
         base:
@@ -348,26 +314,67 @@ key:
 kms:
   service:
     base-url: http://kms-kmsservice.dev-kms.svc.cluster.local:9093/api/kms/v1
+    # base-url: http://local:9093/api/kms/v1
     cors-origin: https://dev.epay.sbi
+    # cors-origin: http://localhost:9093
 
-gateway:
-  booked:
-    refund:
-      card:
-        cron_time: "0 0/01 * * * *"
-  amount:
-    exceeded:
-      refund:
-        card:
-          cron_time: "0 0/45 * * * *"
-  chargeback:
-    processed:
-      refund:
-        card:
-          cron_time: "0 0/50 * * * *"
-  refund:
-    kafka:
-      sslConfig:
-        provided: false
+wibmo:
+  proxy:
+    required: N
 
-# need to check
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  health:
+    livenessState:
+      enabled: true
+    readinessState:
+      enabled: true
+
+epay:
+  payment:
+    inb:
+      callback:
+        url: http://payment-paymentservice.dev-transaction.svc.cluster.local:9093/api/payments/v1/inb/sbi/callback
+    other-inb:
+      callback:
+        url: http://payment-paymentservice.dev-transaction.svc.cluster.local:9093/api/payments/v1/other-inb/sbi/callback
+    testbank:
+      callback:
+        url: http://payment-paymentservice.dev-transaction.svc.cluster.local:9093/api/payments/v1/other-inb/testBank/callback
+
+# UPI.VALIDATE_VPA_CHECK_URL=https://uatupionline.sbi/upi2/upi/web/v2.0/validatevpaweb
+UPI:
+  VALIDATE_VPA_CHECK_URL: https://uatupionline.sbi/upi2/upi/web/v2.0/validateVPAWeb
+
+# International card configuration
+epay:
+  payment:
+    card:
+      callback_url_intl: https://dev.epay.sbi/api/payments/v1/cards/sbi/intl/visamaster/callback
+      callbackg_url_rupay_intl: https://dev.epay.sbi/api/payments/v1/cards/sbi/intl/rupay/callback
+      pvReqURL_intl: https://3ds2-api-3dsserver-intg.pc.enstage-sas.com/3dsserverapi/v5/pVrq/8642/
+      saleAuthURL_intl: https://areionsbi.pc.enstage-sas.com/saleservice/api/v1/sale
+      checkbin_Url_intl: https://areionsbi.pc.enstage-sas.com/authentication/api/v1/checkbin
+      initiate_url_intl: https://areionsbi.pc.enstage-sas.com/authentication/api/v1/initiate
+      generateOtp_url_intl: https://areionsbi.pc.enstage-sas.com/authentication/api/v1/generateOtp
+      resendOtp_url_intl: https://areionsbi.pc.enstage-sas.com/authentication/api/v1/resendOtp
+      verifyOtp_url_intl: https://areionsbi.pc.enstage-sas.com/authentication/api/v1/verifyOtp
+      authorize_url_intl: https://areionsbi.pc.enstage-sas.com/saleservice/api/v1/authorize
+      reverse_url_intl: https://areionsbi.pc.enstage-sas.com/authentication/web/v1/parseRupayResponse
+      token_url_intl: https://cardvault-azure.pc.enstage-sas.com/tokenVault/v3/tokenize
+      api_key_intl: 849ca23e-b115-11ed-a376-005056b59d84
+      clientId_intl: 175f0289-0272-4cd2-bffa-51fc9b6c4101
+      clientApiUser_intl: 100001-HDFC-2lP6tK9sB7
+      clientApiKey_intl: HDFC5nN2pO3aR5
+      tokenSecretKey_intl: f3a81ff0-e139-4e6a-8888-9709a0407713
+      tokenSecretKey_1_intl: c19215e2-c2a4-4630-937b-a3bfd764c96b
+      merchantId_Token_intl: hdfctestmid1
+      tokenRequesterId_MC_intl: 7D6D61B2-0BF9-4763-885F-6E9D7516C00E
+      tokenRequesterId_VS_intl: DFFFAC4C-B2D8-4CEA-BEBB-E7EB1716A348
+      tokenRequesterId_R_intl: 77799966611
+      acquiringBankId_intl: 93734895
+      acquireInstanceId_intl: 93954c92-58ed-4912-8648-0948d5becc69
+      acquirerMerchantId_intl: PAYUGCMID1
