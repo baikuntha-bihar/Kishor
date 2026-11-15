@@ -1,1 +1,30 @@
+ Java 8 Features
 
+Important features:
+
+Lambda Expressions
+
+Functional Interfaces
+
+Stream API
+
+Method References
+
+Optional
+
+Default Methods
+
+Date and Time API
+
+Lambda:
+
+(a, b) -> a + b
+
+Stream:
+
+List<Integer> numbers =
+    Arrays.asList(10, 20, 30, 40);
+
+List<Integer> result = numbers.stream()
+    .filter(n -> n > 20)
+    .collect(Collectors.toList());
