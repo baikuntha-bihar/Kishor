@@ -1,1 +1,62 @@
+CORE JAVA NOTES
+=================
 
+1. What is Java?
+
+Java is a high-level, object-oriented, platform-independent programming language.
+
+Features:
+
+Platform independent
+
+Object-oriented
+
+Secure
+
+Robust
+
+Multithreaded
+
+Automatic memory management
+
+JDK vs JRE vs JVM
+
+Term
+
+Meaning
+
+JDK
+
+Java Development Kit – tools to develop Java applications
+
+JRE
+
+Java Runtime Environment – libraries and runtime components
+
+JVM
+
+Java Virtual Machine – executes Java bytecode
+
+Flow:
+
+Java Source Code (.java) → Compiler (javac) → Bytecode (.class) → JVM → Machine Code
+
+2. OOP Concepts
+
+Encapsulation
+
+Wrapping data and methods into a single class and controlling access using access modifiers.
+
+Example:
+
+public class Employee {
+    private String name;
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+}
