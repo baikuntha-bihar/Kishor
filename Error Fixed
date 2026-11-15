@@ -1,1 +1,138 @@
+Inheritance
 
+One class acquiring the properties and methods of another class.
+
+class Animal {
+    void eat() {
+        System.out.println("Eating");
+    }
+}
+
+class Dog extends Animal {
+    void bark() {
+        System.out.println("Barking");
+    }
+}
+
+Polymorphism
+
+One method or interface can have different implementations.
+
+Types:
+
+Compile-time polymorphism – Method Overloading
+
+Runtime polymorphism – Method Overriding
+
+Abstraction
+
+Hiding implementation details and exposing essential functionality.
+
+Achieved using:
+
+Abstract classes
+
+Interfaces
+
+3. String
+
+String is immutable in Java.
+
+String name = "Java";
+name.concat(" Developer");
+
+System.out.println(name); // Java
+
+To retain the result:
+
+name = name.concat(" Developer");
+
+StringBuilder:
+
+Mutable
+
+Not synchronized
+
+Generally faster for single-threaded modifications
+
+StringBuffer:
+
+Mutable
+
+Synchronized
+
+Suitable when synchronized string modification is required
+
+4. Collections Framework
+
+Collection
+
+Description
+
+List
+
+Ordered, allows duplicates
+
+Set
+
+Does not allow duplicates
+
+Map
+
+Stores key-value pairs
+
+Queue
+
+Processes elements in queue order
+
+Important implementations:
+
+ArrayList
+
+LinkedList
+
+HashSet
+
+LinkedHashSet
+
+TreeSet
+
+HashMap
+
+LinkedHashMap
+
+TreeMap
+
+PriorityQueue
+
+Example:
+
+List<String> names = new ArrayList<>();
+
+names.add("Rahul");
+names.add("Amit");
+names.add("Rahul");
+
+System.out.println(names);
+
+5. Exception Handling
+
+Exception handling prevents unexpected application termination and helps manage errors.
+
+Keywords:
+
+try
+
+catch
+
+finally
+
+throw
+
+throws
+
+Checked Exception: Checked at compile time.
+
+Example: IOException.
+
+Unchecked Exception: Occurs at runtime.
